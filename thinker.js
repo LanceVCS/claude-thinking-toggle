@@ -22,19 +22,57 @@ const RESTORE = args.includes('--restore');
 const CHECK_ONLY = args.includes('--check');
 const HELP = args.includes('--help') || args.includes('-h');
 
+// Parse --color=<value> argument (for header, or both if no content-color)
+const colorArg = args.find(a => a.startsWith('--color='));
+const CUSTOM_COLOR = colorArg ? colorArg.split('=')[1] : null;
+
+// Parse --content-color=<value> argument (for thinking body)
+const contentColorArg = args.find(a => a.startsWith('--content-color='));
+const CONTENT_COLOR = contentColorArg ? contentColorArg.split('=')[1] : null;
+
+// Preset color themes (using hex for reliability with Ink)
+const COLOR_PRESETS = {
+  'dim': null,           // Default dimmed gray
+  'cyan': '#00ffff',
+  'green': '#32cd32',
+  'magenta': '#ff00ff',
+  'yellow': '#ffff00',
+  'blue': '#4169e1',
+  'red': '#ff4444',
+  'white': '#ffffff',
+  'pink': '#ff69b4',
+  'orange': '#ff8c00',
+  'purple': '#9370db',
+  'teal': '#20b2aa',
+  'gold': '#ffd700',
+  'lime': '#00ff00',
+  'coral': '#ff7f50',
+  'sky': '#87ceeb',
+};
+
 if (HELP) {
   console.log(`
 🧠 Thinker - Claude Code Thinking Visibility Patch
 
 Usage:
-  node thinker.js           Apply the patch
-  node thinker.js --dry-run Preview changes without applying
-  node thinker.js --restore Restore from backup
-  node thinker.js --check   Check if current version is patchable
+  node thinker.js                           Apply the patch (default dim gray)
+  node thinker.js --color=green             Apply with custom header color
+  node thinker.js --content-color=pink      Apply with custom content color
+  node thinker.js --color=green --content-color=pink   Watermelon theme! 🍉
+  node thinker.js --dry-run                 Preview changes without applying
+  node thinker.js --restore                 Restore from backup
+  node thinker.js --check                   Check if current version is patchable
+
+Color options:
+  Named:  cyan, green, magenta, yellow, blue, red, white
+  Presets: pink, orange, purple, teal, gold, lime, coral, sky
+  Hex:    #ff69b4, #4ecdc4, etc.
+  RGB:    rgb(255,107,107)
 
 What it does:
   1. Removes the collapsed "∴ Thinking..." banner
   2. Forces thinking content to display inline automatically
+  3. Optionally applies custom colors to header and content separately
   `);
   process.exit(0);
 }
@@ -82,20 +120,36 @@ function getVersion(content) {
 // Extract the NbA thinking component that shows collapsed/expanded view (v2.1.x)
 function extractThinkingComponent(content) {
   // Match the NbA component that contains the collapsed "∴ Thinking (ctrl+o to expand)" text
-  // Pattern: if(!(B||G))return $6A.default.createElement(T,{marginTop:Q?1:0},$6A.default.createElement(C,{dimColor:!0,italic:!0},"∴ Thinking (ctrl+o to expand)"));
+  // Unpatched: if(!(B||G))return $6A.default.createElement(...)
+  // Patched: if(!1)return $6A.default.createElement(...)
   const collapsedRegex = /if\(!\(([A-Z])\|\|([A-Z])\)\)return ([\$A-Za-z0-9]+)\.default\.createElement\(([A-Z]),\{marginTop:[A-Z]\?1:0\},\3\.default\.createElement\(([A-Z]),\{dimColor:!0,italic:!0\},"∴ Thinking \(ctrl\+o to expand\)"\)\);/;
-  const match = content.match(collapsedRegex);
+  const patchedRegex = /if\(!1\)return ([\$A-Za-z0-9]+)\.default\.createElement\(([A-Z]),\{marginTop:[A-Z]\?1:0\},\1\.default\.createElement\(([A-Z]),\{dimColor:!0,italic:!0\},"∴ Thinking \(ctrl\+o to expand\)"\)\);/;
 
-  if (!match) return null;
+  let match = content.match(collapsedRegex);
+  if (match) {
+    return {
+      fullMatch: match[0],
+      transcriptVar: match[1],
+      verboseVar: match[2],
+      reactVar: match[3],
+      wrapperElement: match[4],
+      textElement: match[5],
+      isPatched: false
+    };
+  }
 
-  return {
-    fullMatch: match[0],
-    transcriptVar: match[1],
-    verboseVar: match[2],
-    reactVar: match[3],
-    wrapperElement: match[4],
-    textElement: match[5]
-  };
+  match = content.match(patchedRegex);
+  if (match) {
+    return {
+      fullMatch: match[0],
+      reactVar: match[1],
+      wrapperElement: match[2],
+      textElement: match[3],
+      isPatched: true
+    };
+  }
+
+  return null;
 }
 
 // Legacy: Extract the full banner function using precise pattern matching (pre-v2.1.x)
@@ -162,6 +216,85 @@ function detectThinkingPatternV2(content) {
   };
 }
 
+// Detect the expanded thinking header (v2.1.x) for color patching
+function detectExpandedHeader(content) {
+  // Match: createElement(C,{dimColor:!0,italic:!0},"∴ Thinking…")
+  // Also match if already patched with color (different prop order)
+  // Unpatched: {dimColor:!0,italic:!0}
+  // Patched: {italic:!0,color:"..."}
+  const regexUnpatched = /([\$A-Za-z0-9]+)\.default\.createElement\(([A-Z]),\{dimColor:!0,italic:!0\},"∴ Thinking…"\)/;
+  const regexPatched = /([\$A-Za-z0-9]+)\.default\.createElement\(([A-Z]),\{italic:!0,color:"[^"]+"\},"∴ Thinking…"\)/;
+
+  let match = content.match(regexUnpatched);
+  if (match) {
+    return {
+      fullMatch: match[0],
+      reactVar: match[1],
+      textElement: match[2],
+      isPatched: false
+    };
+  }
+
+  match = content.match(regexPatched);
+  if (match) {
+    return {
+      fullMatch: match[0],
+      reactVar: match[1],
+      textElement: match[2],
+      isPatched: true
+    };
+  }
+
+  return null;
+}
+
+// Detect the thinking content wrapper (v2.1.x) for color patching
+function detectThinkingContent(content) {
+  // Unpatched: createElement(T,{paddingLeft:2},REACT.default.createElement(uV,null,A))
+  // Patched v1: createElement(T,{paddingLeft:2},REACT.default.createElement(uV,null,V1.hex('...')(A)))
+  // Patched v2: createElement(T,{paddingLeft:2},REACT.default.createElement(uV,null,A.split('\n\n').map(p=>p?V1.hex('...')(p):p).join('\n\n')))
+  const regexUnpatched = /([\$A-Za-z0-9]+)\.default\.createElement\(T,\{paddingLeft:2\},\1\.default\.createElement\(([a-zA-Z0-9]+),null,([A-Z])\)\)/;
+  const regexPatchedV1 = /([\$A-Za-z0-9]+)\.default\.createElement\(T,\{paddingLeft:2\},\1\.default\.createElement\(([a-zA-Z0-9]+),null,V1\.hex\('[^']+'\)\(([A-Z])\)\)\)/;
+  const regexPatchedV2 = /([\$A-Za-z0-9]+)\.default\.createElement\(T,\{paddingLeft:2\},\1\.default\.createElement\(([a-zA-Z0-9]+),null,([A-Z])\.split\('\\\\n\\\\n'\)\.map\(p=>p\?V1\.hex\('[^']+'\)\(p\):p\)\.join\('\\\\n\\\\n'\)\)\)/;
+
+  let match = content.match(regexUnpatched);
+  if (match) {
+    return {
+      fullMatch: match[0],
+      reactVar: match[1],
+      contentComponent: match[2],
+      contentVar: match[3],
+      isPatched: false
+    };
+  }
+
+  // Check for v2 patched format first (paragraph-based coloring)
+  match = content.match(regexPatchedV2);
+  if (match) {
+    return {
+      fullMatch: match[0],
+      reactVar: match[1],
+      contentComponent: match[2],
+      contentVar: match[3],
+      isPatched: true
+    };
+  }
+
+  // Check for v1 patched format (simple wrap)
+  match = content.match(regexPatchedV1);
+  if (match) {
+    return {
+      fullMatch: match[0],
+      reactVar: match[1],
+      contentComponent: match[2],
+      contentVar: match[3],
+      isPatched: true
+    };
+  }
+
+  return null;
+}
+
 // Detect the thinking case pattern (legacy pre-v2.1.x)
 function detectThinkingPattern(content) {
   // Pattern: case"thinking":if(!X&&!Y)return null;return ZZZ.createElement(AAA,{addMargin:B,param:C,isTranscriptMode:D,verbose:E})
@@ -226,6 +359,15 @@ function main() {
   const thinkingInfoV2 = detectThinkingPatternV2(content);
   const thinkingInfoLegacy = detectThinkingPattern(content);
   const thinkingInfo = thinkingInfoV2 || thinkingInfoLegacy;
+  const expandedHeaderInfo = detectExpandedHeader(content);
+  const thinkingContentInfo = detectThinkingContent(content);
+
+  // Resolve colors from preset or use as-is
+  const resolvedHeaderColor = CUSTOM_COLOR ? (COLOR_PRESETS[CUSTOM_COLOR] || CUSTOM_COLOR) : null;
+  // Content color defaults to header color if not specified separately
+  const resolvedContentColor = CONTENT_COLOR
+    ? (COLOR_PRESETS[CONTENT_COLOR] || CONTENT_COLOR)
+    : resolvedHeaderColor;
 
   console.log('🔬 Pattern Detection:');
 
@@ -244,15 +386,44 @@ function main() {
     console.log('   ⚠️  Thinking case not detected');
   }
 
-  const hasPatchablePatterns = (bannerInfo || thinkingComponentInfo) || thinkingInfo;
-
-  if (CHECK_ONLY) {
-    console.log(`\n${hasPatchablePatterns ? '✅ Version is patchable!' : '❌ Version may not be fully patchable'}`);
-    process.exit(hasPatchablePatterns ? 0 : 1);
+  if (expandedHeaderInfo) {
+    console.log(`   ✅ Expanded header: "∴ Thinking…" text found`);
+  } else {
+    console.log('   ⚠️  Expanded header not detected');
   }
 
-  if (!hasPatchablePatterns) {
-    console.error('\n❌ No patchable patterns found.');
+  if (thinkingContentInfo) {
+    console.log(`   ✅ Thinking content: wrapper found (${thinkingContentInfo.contentComponent})`);
+  } else {
+    console.log('   ⚠️  Thinking content wrapper not detected');
+  }
+
+  if (resolvedHeaderColor || resolvedContentColor) {
+    if (resolvedHeaderColor === resolvedContentColor) {
+      console.log(`   🎨 Color: ${resolvedHeaderColor}`);
+    } else {
+      console.log(`   🎨 Header: ${resolvedHeaderColor || 'default'}`);
+      console.log(`   🎨 Content: ${resolvedContentColor || 'default'}`);
+    }
+  }
+
+  // Check what patterns we can work with
+  const hasUnpatchedPatterns = (bannerInfo || (thinkingComponentInfo && !thinkingComponentInfo.isPatched)) || thinkingInfo;
+  const hasAlreadyPatched = (thinkingComponentInfo?.isPatched) || (expandedHeaderInfo?.isPatched) || (thinkingContentInfo?.isPatched);
+  const hasContentToColor = resolvedContentColor && thinkingContentInfo && !thinkingContentInfo.isPatched;
+
+  if (CHECK_ONLY) {
+    const patchable = hasUnpatchedPatterns || hasContentToColor;
+    console.log(`\n${patchable ? '✅ Version is patchable!' : hasAlreadyPatched ? '⚠️  Already patched (use --restore to reset)' : '❌ Version may not be fully patchable'}`);
+    process.exit(patchable ? 0 : 1);
+  }
+
+  if (!hasUnpatchedPatterns && !hasContentToColor) {
+    if (hasAlreadyPatched) {
+      console.log('\n⚠️  File appears already patched. Use --restore to reset, then re-patch.');
+    } else {
+      console.error('\n❌ No patchable patterns found.');
+    }
     process.exit(1);
   }
 
@@ -264,21 +435,23 @@ function main() {
 
   // Patch 1a: v2.1.x component patch - change if(!(B||G)) to if(!1) to never show collapsed
   if (thinkingComponentInfo) {
-    const replacement = thinkingComponentInfo.fullMatch.replace(
-      `if(!(${thinkingComponentInfo.transcriptVar}||${thinkingComponentInfo.verboseVar}))`,
-      'if(!1)'
-    );
-
-    if (patched.includes(thinkingComponentInfo.fullMatch)) {
-      if (!DRY_RUN) {
-        patched = patched.replace(thinkingComponentInfo.fullMatch, replacement);
-      }
-      patchCount++;
-      console.log('   ✅ Component collapsed view disabled' + (DRY_RUN ? ' [DRY RUN]' : ''));
-    } else if (patched.includes('if(!1)return') && patched.includes('∴ Thinking')) {
+    if (thinkingComponentInfo.isPatched) {
       console.log('   ⚠️  Component already patched');
     } else {
-      console.log('   ❌ Component patch failed - pattern mismatch');
+      const replacement = thinkingComponentInfo.fullMatch.replace(
+        `if(!(${thinkingComponentInfo.transcriptVar}||${thinkingComponentInfo.verboseVar}))`,
+        'if(!1)'
+      );
+
+      if (patched.includes(thinkingComponentInfo.fullMatch)) {
+        if (!DRY_RUN) {
+          patched = patched.replace(thinkingComponentInfo.fullMatch, replacement);
+        }
+        patchCount++;
+        console.log('   ✅ Component collapsed view disabled' + (DRY_RUN ? ' [DRY RUN]' : ''));
+      } else {
+        console.log('   ❌ Component patch failed - pattern mismatch');
+      }
     }
   }
   // Patch 1b: Legacy banner removal - use exact string replacement
@@ -319,6 +492,82 @@ function main() {
       console.log('   ⚠️  Thinking already patched');
     } else {
       console.log('   ❌ Thinking patch failed - pattern mismatch');
+    }
+  }
+
+  // Patch 3: Custom color for expanded header (optional)
+  if (resolvedHeaderColor && expandedHeaderInfo) {
+    if (expandedHeaderInfo.isPatched) {
+      console.log('   ⚠️  Header color already patched');
+    } else {
+      // Remove dimColor and use color directly for vibrant colors
+      const colorValue = `"${resolvedHeaderColor}"`;
+
+      // Replace {dimColor:!0,italic:!0} with {italic:!0,color:"<color>"} - remove dimColor!
+      const replacement = `${expandedHeaderInfo.reactVar}.default.createElement(${expandedHeaderInfo.textElement},{italic:!0,color:${colorValue}},"∴ Thinking…")`;
+
+      if (patched.includes(expandedHeaderInfo.fullMatch)) {
+        if (!DRY_RUN) {
+          patched = patched.replace(expandedHeaderInfo.fullMatch, replacement);
+        }
+        patchCount++;
+        console.log(`   ✅ Header color: ${resolvedHeaderColor}` + (DRY_RUN ? ' [DRY RUN]' : ''));
+      } else {
+        console.log('   ❌ Header color patch failed - pattern mismatch');
+      }
+    }
+  }
+
+  // Patch 4: Custom color for thinking content
+  // We pass color as a prop to uV, then uV passes it to each t3 (Text) element
+  // This uses Ink's native color prop which works reliably across line wraps
+  if (resolvedContentColor && thinkingContentInfo) {
+    if (thinkingContentInfo.isPatched) {
+      console.log('   ⚠️  Content color already patched');
+    } else {
+      const colorValue = resolvedContentColor;
+
+      // Step 4a: Modify uV to accept color prop and pass it to t3 elements
+      // Find: function uV({children:A})
+      // Replace: function uV({children:A,color:$TC})
+      const uVSignatureRegex = /function uV\(\{children:([A-Z])\}\)/;
+      const uVMatch = patched.match(uVSignatureRegex);
+
+      if (uVMatch) {
+        const childrenVar = uVMatch[1];
+        const newSignature = `function uV({children:${childrenVar},color:$TC})`;
+        patched = patched.replace(uVMatch[0], newSignature);
+
+        // Step 4b: Wrap t3 in C (Text) which accepts color prop
+        // t3 is a custom component that ignores color prop, but C cascades it
+        // Exact pattern from uV: Y.push(XV1.default.createElement(t3,{key:Y.length},J.trim()))
+        // Replace with: Y.push(XV1.default.createElement(C,{key:Y.length,color:$TC},XV1.default.createElement(t3,null,J.trim())))
+
+        // Match the exact flush pattern - variables may differ but structure is consistent
+        // Pattern: ARRAY.push(REACT.default.createElement(t3,{key:ARRAY.length},TEXT.trim()))
+        const flushRegex = /([A-Z])\.push\(([A-Za-z0-9$]+)\.default\.createElement\(t3,\{key:\1\.length\},([A-Z])\.trim\(\)\)\)/g;
+
+        patched = patched.replace(flushRegex, (match, arrayVar, reactVar, textVar) => {
+          // Wrap t3 in C with color prop
+          return `${arrayVar}.push(${reactVar}.default.createElement(C,{key:${arrayVar}.length,color:$TC},${reactVar}.default.createElement(t3,null,${textVar}.trim())))`;
+        });
+
+        // Step 4c: Modify NbA to pass color to uV
+        // Find: createElement(uV,null,A) in the thinking content context
+        // Replace: createElement(uV,{color:'#ff69b4'},A)
+        const callPattern = `${thinkingContentInfo.reactVar}.default.createElement(${thinkingContentInfo.contentComponent},null,${thinkingContentInfo.contentVar})`;
+        const callReplacement = `${thinkingContentInfo.reactVar}.default.createElement(${thinkingContentInfo.contentComponent},{color:'${colorValue}'},${thinkingContentInfo.contentVar})`;
+
+        if (patched.includes(callPattern)) {
+          patched = patched.replace(callPattern, callReplacement);
+          patchCount++;
+          console.log(`   ✅ Content color: ${resolvedContentColor} (via Ink color prop)` + (DRY_RUN ? ' [DRY RUN]' : ''));
+        } else {
+          console.log('   ❌ Content color patch failed - uV call pattern mismatch');
+        }
+      } else {
+        console.log('   ❌ Content color patch failed - uV signature not found');
+      }
     }
   }
 
