@@ -79,7 +79,26 @@ function getVersion(content) {
   return match ? match[1] : 'unknown';
 }
 
-// Extract the full banner function using precise pattern matching
+// Extract the NbA thinking component that shows collapsed/expanded view (v2.1.x)
+function extractThinkingComponent(content) {
+  // Match the NbA component that contains the collapsed "∴ Thinking (ctrl+o to expand)" text
+  // Pattern: if(!(B||G))return $6A.default.createElement(T,{marginTop:Q?1:0},$6A.default.createElement(C,{dimColor:!0,italic:!0},"∴ Thinking (ctrl+o to expand)"));
+  const collapsedRegex = /if\(!\(([A-Z])\|\|([A-Z])\)\)return ([\$A-Za-z0-9]+)\.default\.createElement\(([A-Z]),\{marginTop:[A-Z]\?1:0\},\3\.default\.createElement\(([A-Z]),\{dimColor:!0,italic:!0\},"∴ Thinking \(ctrl\+o to expand\)"\)\);/;
+  const match = content.match(collapsedRegex);
+
+  if (!match) return null;
+
+  return {
+    fullMatch: match[0],
+    transcriptVar: match[1],
+    verboseVar: match[2],
+    reactVar: match[3],
+    wrapperElement: match[4],
+    textElement: match[5]
+  };
+}
+
+// Legacy: Extract the full banner function using precise pattern matching (pre-v2.1.x)
 function extractBannerFunction(content) {
   // Match the banner function signature and capture the function name
   // Pattern: function XXX({streamMode:A}){let[...]=YYY.useState(null),[...]=YYY.useState(null);if(YYY.useEffect...
@@ -121,7 +140,29 @@ function extractBannerFunction(content) {
   };
 }
 
-// Detect the thinking case pattern
+// Detect the thinking case pattern (v2.1.x with hideInTranscript)
+function detectThinkingPatternV2(content) {
+  // Pattern: case"thinking":{if(!D&&!Z)return null;return XXX.createElement(YYY,{addMargin:Q,param:A,isTranscriptMode:D,verbose:Z,hideInTranscript:...}
+  const regex = /case"thinking":\{if\(!([A-Z])&&!([A-Z])\)return null;return ([a-z0-9]+)\.createElement\(([A-Za-z0-9]+),\{addMargin:([A-Z]),param:([A-Z]),isTranscriptMode:([A-Z]),verbose:([A-Z]),hideInTranscript:[^}]+\}/;
+  const match = content.match(regex);
+
+  if (!match) return null;
+
+  return {
+    fullMatch: match[0],
+    guardVar1: match[1],
+    guardVar2: match[2],
+    reactVar: match[3],
+    componentName: match[4],
+    addMarginVar: match[5],
+    paramVar: match[6],
+    transcriptVar: match[7],
+    verboseVar: match[8],
+    version: 'v2.1'
+  };
+}
+
+// Detect the thinking case pattern (legacy pre-v2.1.x)
 function detectThinkingPattern(content) {
   // Pattern: case"thinking":if(!X&&!Y)return null;return ZZZ.createElement(AAA,{addMargin:B,param:C,isTranscriptMode:D,verbose:E})
   // React var can include $ (like $7)
@@ -139,7 +180,8 @@ function detectThinkingPattern(content) {
     addMarginVar: match[5],
     paramVar: match[6],
     transcriptVar: match[7],
-    verboseVar: match[8]
+    verboseVar: match[8],
+    version: 'legacy'
   };
 }
 
@@ -178,30 +220,38 @@ function main() {
   const version = getVersion(content);
   console.log(`📦 Version: ${version}\n`);
 
-  // Detect patterns
+  // Detect patterns - try v2.1.x first, then legacy
   const bannerInfo = extractBannerFunction(content);
-  const thinkingInfo = detectThinkingPattern(content);
+  const thinkingComponentInfo = extractThinkingComponent(content);
+  const thinkingInfoV2 = detectThinkingPatternV2(content);
+  const thinkingInfoLegacy = detectThinkingPattern(content);
+  const thinkingInfo = thinkingInfoV2 || thinkingInfoLegacy;
 
   console.log('🔬 Pattern Detection:');
-  if (bannerInfo) {
+
+  // For v2.1.x, we patch the component instead of the banner
+  if (thinkingComponentInfo) {
+    console.log(`   ✅ Thinking component: collapsed view detected (v2.1.x)`);
+  } else if (bannerInfo) {
     console.log(`   ✅ Banner function: ${bannerInfo.funcName}() [${bannerInfo.fullFunction.length} chars]`);
   } else {
-    console.log('   ⚠️  Banner function not detected');
+    console.log('   ⚠️  Banner/component not detected');
   }
 
   if (thinkingInfo) {
-    console.log(`   ✅ Thinking case: component ${thinkingInfo.componentName}`);
+    console.log(`   ✅ Thinking case: component ${thinkingInfo.componentName} (${thinkingInfo.version})`);
   } else {
     console.log('   ⚠️  Thinking case not detected');
   }
 
+  const hasPatchablePatterns = (bannerInfo || thinkingComponentInfo) || thinkingInfo;
+
   if (CHECK_ONLY) {
-    const patchable = bannerInfo && thinkingInfo;
-    console.log(`\n${patchable ? '✅ Version is patchable!' : '❌ Version may not be fully patchable'}`);
-    process.exit(patchable ? 0 : 1);
+    console.log(`\n${hasPatchablePatterns ? '✅ Version is patchable!' : '❌ Version may not be fully patchable'}`);
+    process.exit(hasPatchablePatterns ? 0 : 1);
   }
 
-  if (!bannerInfo && !thinkingInfo) {
+  if (!hasPatchablePatterns) {
     console.error('\n❌ No patchable patterns found.');
     process.exit(1);
   }
@@ -212,8 +262,27 @@ function main() {
 
   console.log('\n📝 Applying patches:');
 
-  // Patch 1: Banner removal - use exact string replacement
-  if (bannerInfo) {
+  // Patch 1a: v2.1.x component patch - change if(!(B||G)) to if(!1) to never show collapsed
+  if (thinkingComponentInfo) {
+    const replacement = thinkingComponentInfo.fullMatch.replace(
+      `if(!(${thinkingComponentInfo.transcriptVar}||${thinkingComponentInfo.verboseVar}))`,
+      'if(!1)'
+    );
+
+    if (patched.includes(thinkingComponentInfo.fullMatch)) {
+      if (!DRY_RUN) {
+        patched = patched.replace(thinkingComponentInfo.fullMatch, replacement);
+      }
+      patchCount++;
+      console.log('   ✅ Component collapsed view disabled' + (DRY_RUN ? ' [DRY RUN]' : ''));
+    } else if (patched.includes('if(!1)return') && patched.includes('∴ Thinking')) {
+      console.log('   ⚠️  Component already patched');
+    } else {
+      console.log('   ❌ Component patch failed - pattern mismatch');
+    }
+  }
+  // Patch 1b: Legacy banner removal - use exact string replacement
+  else if (bannerInfo) {
     const replacement = `function ${bannerInfo.funcName}({streamMode:A}){return null}`;
 
     if (patched.includes(bannerInfo.fullFunction)) {
@@ -229,9 +298,16 @@ function main() {
     }
   }
 
-  // Patch 2: Thinking visibility
+  // Patch 2: Thinking visibility - remove guard and force transcript mode
   if (thinkingInfo) {
-    const replacement = `case"thinking":return ${thinkingInfo.reactVar}.createElement(${thinkingInfo.componentName},{addMargin:${thinkingInfo.addMarginVar},param:${thinkingInfo.paramVar},isTranscriptMode:!0,verbose:${thinkingInfo.verboseVar}})`;
+    let replacement;
+    if (thinkingInfo.version === 'v2.1') {
+      // v2.1.x: case"thinking":{...} format with hideInTranscript
+      replacement = `case"thinking":{return ${thinkingInfo.reactVar}.createElement(${thinkingInfo.componentName},{addMargin:${thinkingInfo.addMarginVar},param:${thinkingInfo.paramVar},isTranscriptMode:!0,verbose:${thinkingInfo.verboseVar},hideInTranscript:!1}`;
+    } else {
+      // Legacy format
+      replacement = `case"thinking":return ${thinkingInfo.reactVar}.createElement(${thinkingInfo.componentName},{addMargin:${thinkingInfo.addMarginVar},param:${thinkingInfo.paramVar},isTranscriptMode:!0,verbose:${thinkingInfo.verboseVar}})`;
+    }
 
     if (patched.includes(thinkingInfo.fullMatch)) {
       if (!DRY_RUN) {
@@ -239,7 +315,7 @@ function main() {
       }
       patchCount++;
       console.log('   ✅ Thinking visibility' + (DRY_RUN ? ' [DRY RUN]' : ''));
-    } else if (patched.includes('case"thinking":return') && patched.includes('isTranscriptMode:!0')) {
+    } else if (patched.includes('case"thinking":') && patched.includes('isTranscriptMode:!0')) {
       console.log('   ⚠️  Thinking already patched');
     } else {
       console.log('   ❌ Thinking patch failed - pattern mismatch');
