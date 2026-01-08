@@ -30,6 +30,17 @@ const CUSTOM_COLOR = colorArg ? colorArg.split('=')[1] : null;
 const contentColorArg = args.find(a => a.startsWith('--content-color='));
 const CONTENT_COLOR = contentColorArg ? contentColorArg.split('=')[1] : null;
 
+// Parse --theme=<value> argument (for preset theme combos)
+const themeArg = args.find(a => a.startsWith('--theme='));
+const THEME = themeArg ? themeArg.split('=')[1] : null;
+
+// Preset theme combos (header + content)
+const THEME_PRESETS = {
+  'watermelon': { header: '#32cd32', content: '#ff69b4' },
+  'emerald-saffron': { header: '#00C853', content: '#F4C24D' },
+  'bubblegum': { header: '#87ceeb', content: '#ff69b4' },
+};
+
 // Preset color themes (using hex for reliability with Ink)
 const COLOR_PRESETS = {
   'dim': null,           // Default dimmed gray
@@ -56,12 +67,19 @@ if (HELP) {
 
 Usage:
   node thinker.js                           Apply the patch (default dim gray)
+  node thinker.js --theme=watermelon        Apply preset theme 🍉
+  node thinker.js --theme=emerald-saffron   Apply preset theme 🌿
   node thinker.js --color=green             Apply with custom header color
   node thinker.js --content-color=pink      Apply with custom content color
-  node thinker.js --color=green --content-color=pink   Watermelon theme! 🍉
+  node thinker.js --color=green --content-color=pink   Custom combo
   node thinker.js --dry-run                 Preview changes without applying
   node thinker.js --restore                 Restore from backup
   node thinker.js --check                   Check if current version is patchable
+
+Theme presets:
+  watermelon       Green header + pink content 🍉
+  emerald-saffron  Emerald header + gold content 🌿
+  bubblegum        Sky blue header + pink content 🫧
 
 Color options:
   Named:  cyan, green, magenta, yellow, blue, red, white
@@ -362,12 +380,20 @@ function main() {
   const expandedHeaderInfo = detectExpandedHeader(content);
   const thinkingContentInfo = detectThinkingContent(content);
 
-  // Resolve colors from preset or use as-is
-  const resolvedHeaderColor = CUSTOM_COLOR ? (COLOR_PRESETS[CUSTOM_COLOR] || CUSTOM_COLOR) : null;
-  // Content color defaults to header color if not specified separately
-  const resolvedContentColor = CONTENT_COLOR
-    ? (COLOR_PRESETS[CONTENT_COLOR] || CONTENT_COLOR)
-    : resolvedHeaderColor;
+  // Resolve colors from theme preset, individual presets, or use as-is
+  let resolvedHeaderColor, resolvedContentColor;
+
+  if (THEME && THEME_PRESETS[THEME]) {
+    // Theme preset overrides individual colors
+    resolvedHeaderColor = THEME_PRESETS[THEME].header;
+    resolvedContentColor = THEME_PRESETS[THEME].content;
+  } else {
+    resolvedHeaderColor = CUSTOM_COLOR ? (COLOR_PRESETS[CUSTOM_COLOR] || CUSTOM_COLOR) : null;
+    // Content color defaults to header color if not specified separately
+    resolvedContentColor = CONTENT_COLOR
+      ? (COLOR_PRESETS[CONTENT_COLOR] || CONTENT_COLOR)
+      : resolvedHeaderColor;
+  }
 
   console.log('🔬 Pattern Detection:');
 
