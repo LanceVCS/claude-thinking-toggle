@@ -1,0 +1,328 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Thinker Theme Palette</title>
+  <style>
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+    }
+
+    body {
+      font-family: 'SF Mono', 'Monaco', 'Inconsolata', 'Fira Code', monospace;
+      background: #1a1a2e;
+      color: #eee;
+      padding: 40px;
+      min-height: 100vh;
+    }
+
+    h1 {
+      text-align: center;
+      margin-bottom: 10px;
+      font-size: 2.5rem;
+      background: linear-gradient(135deg, #ff8c00, #32cd32);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+      background-clip: text;
+    }
+
+    .subtitle {
+      text-align: center;
+      color: #888;
+      margin-bottom: 50px;
+      font-size: 0.9rem;
+    }
+
+    .category {
+      margin-bottom: 50px;
+    }
+
+    .category-header {
+      font-size: 1.4rem;
+      margin-bottom: 20px;
+      padding-bottom: 10px;
+      border-bottom: 2px solid #333;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+
+    .category-icon {
+      font-size: 1.6rem;
+    }
+
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
+      gap: 20px;
+    }
+
+    .card {
+      background: #16213e;
+      border-radius: 12px;
+      padding: 20px;
+      transition: transform 0.2s, box-shadow 0.2s;
+      cursor: pointer;
+      position: relative;
+    }
+
+    .card:hover {
+      transform: translateY(-4px);
+      box-shadow: 0 10px 30px rgba(0,0,0,0.3);
+    }
+
+    .card-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 15px;
+    }
+
+    .theme-name {
+      font-size: 1.1rem;
+      font-weight: 600;
+    }
+
+    .copy-btn {
+      background: #333;
+      border: none;
+      color: #888;
+      padding: 4px 10px;
+      border-radius: 4px;
+      font-size: 0.75rem;
+      cursor: pointer;
+      transition: all 0.2s;
+    }
+
+    .copy-btn:hover {
+      background: #444;
+      color: #fff;
+    }
+
+    .copy-btn.copied {
+      background: #32cd32;
+      color: #000;
+    }
+
+    .colors {
+      display: flex;
+      gap: 15px;
+      margin-bottom: 15px;
+    }
+
+    .color-item {
+      flex: 1;
+    }
+
+    .color-label {
+      font-size: 0.7rem;
+      color: #666;
+      text-transform: uppercase;
+      margin-bottom: 6px;
+    }
+
+    .color-swatch {
+      height: 40px;
+      border-radius: 6px;
+      margin-bottom: 6px;
+    }
+
+    .color-hex {
+      font-size: 0.8rem;
+      color: #888;
+    }
+
+    .preview {
+      background: #0f0f1a;
+      border-radius: 8px;
+      padding: 12px;
+      margin-top: 10px;
+    }
+
+    .preview-header {
+      font-style: italic;
+      margin-bottom: 8px;
+    }
+
+    .preview-content {
+      font-size: 0.85rem;
+      line-height: 1.5;
+    }
+
+    .existing-badge {
+      position: absolute;
+      top: 10px;
+      right: 10px;
+      background: #ff8c00;
+      color: #000;
+      font-size: 0.65rem;
+      padding: 2px 6px;
+      border-radius: 3px;
+      font-weight: 600;
+    }
+
+    footer {
+      text-align: center;
+      margin-top: 60px;
+      color: #555;
+      font-size: 0.8rem;
+    }
+
+    footer code {
+      background: #333;
+      padding: 2px 8px;
+      border-radius: 4px;
+      color: #aaa;
+    }
+  </style>
+</head>
+<body>
+  <h1>Thinker Theme Palette</h1>
+  <p class="subtitle">30 color pairings for Claude Code thinking blocks</p>
+
+  <div id="themes"></div>
+
+  <footer>
+    <p>Apply with: <code>node thinker.js --theme=&lt;name&gt;</code></p>
+  </footer>
+
+  <script>
+    const themes = {
+      'Nature Inspired': {
+        icon: '🌿',
+        themes: [
+          { name: 'sunset', header: '#FF6B6B', content: '#FFD93D', desc: 'coral / gold' },
+          { name: 'ocean', header: '#20B2AA', content: '#98D8C8', desc: 'teal / seafoam' },
+          { name: 'forest', header: '#228B22', content: '#90EE90', desc: 'emerald / moss' },
+          { name: 'lavender-fields', header: '#9370DB', content: '#E6E6FA', desc: 'purple / lavender' },
+          { name: 'autumn', header: '#D2691E', content: '#FFBF00', desc: 'burnt orange / amber' },
+          { name: 'cherry-blossom', header: '#FF69B4', content: '#FFB6C1', desc: 'pink / soft rose' },
+        ]
+      },
+      'Neon / Cyberpunk': {
+        icon: '⚡',
+        themes: [
+          { name: 'synthwave', header: '#FF1493', content: '#00BFFF', desc: 'hot pink / electric blue' },
+          { name: 'matrix', header: '#00FF00', content: '#32CD32', desc: 'bright green / lime' },
+          { name: 'vapor', header: '#00FFFF', content: '#FF00FF', desc: 'cyan / magenta' },
+          { name: 'neon-sunset', header: '#FF4500', content: '#FF1493', desc: 'orange-red / hot pink' },
+          { name: 'electric', header: '#FFFF00', content: '#9400D3', desc: 'yellow / electric purple' },
+        ]
+      },
+      'Elegant / Minimal': {
+        icon: '✨',
+        themes: [
+          { name: 'monochrome', header: '#FFFFFF', content: '#C0C0C0', desc: 'white / silver' },
+          { name: 'noir', header: '#FFD700', content: '#A9A9A9', desc: 'gold / warm gray' },
+          { name: 'frost', header: '#ADD8E6', content: '#C0C0C0', desc: 'ice blue / silver' },
+          { name: 'pearl', header: '#FFB6C1', content: '#FFFDD0', desc: 'soft pink / cream' },
+          { name: 'slate', header: '#708090', content: '#778899', desc: 'slate blue / steel' },
+        ]
+      },
+      'Warm Palettes': {
+        icon: '🔥',
+        themes: [
+          { name: 'ember', header: '#FF4500', content: '#FFD700', desc: 'red-orange / gold' },
+          { name: 'terracotta', header: '#E2725B', content: '#FFDAB9', desc: 'rust / peach' },
+          { name: 'spice', header: '#D2691E', content: '#E49B0F', desc: 'cinnamon / turmeric' },
+          { name: 'campfire', header: '#FFBF00', content: '#FF8C00', desc: 'amber / dark orange' },
+          { name: 'desert', header: '#EDC9AF', content: '#A0522D', desc: 'sand / sienna' },
+        ]
+      },
+      'Cool Palettes': {
+        icon: '❄️',
+        themes: [
+          { name: 'arctic', header: '#B0E0E6', content: '#98FF98', desc: 'powder blue / mint' },
+          { name: 'deep-sea', header: '#000080', content: '#00CED1', desc: 'navy / turquoise' },
+          { name: 'twilight', header: '#4B0082', content: '#CCCCFF', desc: 'indigo / periwinkle' },
+          { name: 'mint-chip', header: '#98FF98', content: '#D2691E', desc: 'mint / chocolate' },
+          { name: 'glacier', header: '#E0FFFF', content: '#F0F8FF', desc: 'light cyan / alice blue' },
+        ]
+      },
+      'Playful / Bold': {
+        icon: '🎨',
+        themes: [
+          { name: 'candy', header: '#FF1493', content: '#40E0D0', desc: 'hot pink / turquoise' },
+          { name: 'citrus', header: '#32CD32', content: '#FFA500', desc: 'lime / orange' },
+          { name: 'berry', header: '#DC143C', content: '#8A2BE2', desc: 'crimson / blue-violet' },
+          { name: 'tropical', header: '#FF9933', content: '#008080', desc: 'mango / teal' },
+        ]
+      }
+    };
+
+    // Existing themes in thinker.js (9 total)
+    const existingThemes = {
+      'watermelon': { header: '#32cd32', content: '#FF77FF' },
+      'emerald-saffron': { header: '#00C853', content: '#F4C24D' },
+      'bubblegum': { header: '#87ceeb', content: '#FF77FF' },
+      'carrot': { header: '#ff8c00', content: '#32cd32' },
+      'autumn': { header: '#FFBF00', content: '#D2691E' },
+      'ocean': { header: '#98D8C8', content: '#20B2AA' },
+      'forest': { header: '#90EE90', content: '#228B22' },
+      'cherry-blossom': { header: '#FF69B4', content: '#FFB6C1' },
+      'cyberpunk': { header: '#FCE300', content: '#00F0FF' },
+    };
+
+    function createCard(theme) {
+      const isExisting = theme.name in existingThemes;
+      return `
+        <div class="card" onclick="copyTheme('${theme.name}', this)">
+          ${isExisting ? '<span class="existing-badge">INSTALLED</span>' : ''}
+          <div class="card-header">
+            <span class="theme-name">${theme.name}</span>
+            <button class="copy-btn">copy</button>
+          </div>
+          <div class="colors">
+            <div class="color-item">
+              <div class="color-label">Header</div>
+              <div class="color-swatch" style="background: ${theme.header}"></div>
+              <div class="color-hex">${theme.header}</div>
+            </div>
+            <div class="color-item">
+              <div class="color-label">Content</div>
+              <div class="color-swatch" style="background: ${theme.content}"></div>
+              <div class="color-hex">${theme.content}</div>
+            </div>
+          </div>
+          <div class="preview">
+            <div class="preview-header" style="color: ${theme.header}">∴ Thinking…</div>
+            <div class="preview-content" style="color: ${theme.content}">The user is asking about color themes. Let me analyze the request and provide helpful suggestions...</div>
+          </div>
+        </div>
+      `;
+    }
+
+    function copyTheme(name, card) {
+      const cmd = `--theme=${name}`;
+      navigator.clipboard.writeText(cmd);
+      const btn = card.querySelector('.copy-btn');
+      btn.textContent = 'copied!';
+      btn.classList.add('copied');
+      setTimeout(() => {
+        btn.textContent = 'copy';
+        btn.classList.remove('copied');
+      }, 1500);
+    }
+
+    const container = document.getElementById('themes');
+
+    for (const [category, data] of Object.entries(themes)) {
+      const section = document.createElement('div');
+      section.className = 'category';
+      section.innerHTML = `
+        <h2 class="category-header">
+          <span class="category-icon">${data.icon}</span>
+          ${category}
+        </h2>
+        <div class="grid">
+          ${data.themes.map(createCard).join('')}
+        </div>
+      `;
+      container.appendChild(section);
+    }
+  </script>
+</body>
+</html>

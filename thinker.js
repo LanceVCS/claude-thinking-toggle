@@ -36,9 +36,15 @@ const THEME = themeArg ? themeArg.split('=')[1] : null;
 
 // Preset theme combos (header + content)
 const THEME_PRESETS = {
-  'watermelon': { header: '#32cd32', content: '#ff69b4' },
+  'watermelon': { header: '#32cd32', content: '#FF77FF' },
   'emerald-saffron': { header: '#00C853', content: '#F4C24D' },
-  'bubblegum': { header: '#87ceeb', content: '#ff69b4' },
+  'bubblegum': { header: '#87ceeb', content: '#FF77FF' },
+  'carrot': { header: '#ff8c00', content: '#32cd32' },
+  'autumn': { header: '#FFBF00', content: '#D2691E' },
+  'ocean': { header: '#98D8C8', content: '#20B2AA' },
+  'forest': { header: '#90EE90', content: '#228B22' },
+  'cherry-blossom': { header: '#FF69B4', content: '#FFB6C1' },
+  'cyberpunk': { header: '#FCE300', content: '#00F0FF' },
 };
 
 // Preset color themes (using hex for reliability with Ink)
@@ -61,6 +67,191 @@ const COLOR_PRESETS = {
   'sky': '#87ceeb',
 };
 
+// ============================================
+// ANCHOR-BASED PATTERN UTILITIES
+// These functions use stable string anchors and
+// bracket balancing instead of hardcoded minified names
+// ============================================
+
+/**
+ * Find matching closing paren/bracket/brace starting from an opening one
+ * Handles nested structures and skips string literals
+ * @param {string} code - Source code
+ * @param {number} start - Index of opening paren/bracket/brace
+ * @returns {number} Index of matching closer, or -1 if not found
+ */
+function findMatchingClose(code, start) {
+  const openers = '([{';
+  const closers = ')]}';
+  const opener = code[start];
+  const openerIdx = openers.indexOf(opener);
+  if (openerIdx === -1) return -1;
+  const closer = closers[openerIdx];
+
+  let depth = 1;
+  let i = start + 1;
+  let inString = false;
+  let stringChar = null;
+
+  while (i < code.length && depth > 0) {
+    const ch = code[i];
+    const prev = code[i - 1];
+
+    // Handle string literals (skip content inside strings)
+    if (!inString && (ch === '"' || ch === "'" || ch === '`')) {
+      inString = true;
+      stringChar = ch;
+    } else if (inString && ch === stringChar && prev !== '\\') {
+      inString = false;
+      stringChar = null;
+    } else if (!inString) {
+      if (ch === opener) depth++;
+      else if (ch === closer) depth--;
+    }
+    i++;
+  }
+
+  return depth === 0 ? i - 1 : -1;
+}
+
+/**
+ * Find a createElement call that contains a given index position
+ * Searches backward for ".createElement(" then verifies containment
+ * @param {string} code - Source code
+ * @param {number} containsIdx - Index that must be inside the call
+ * @param {number} searchWindow - How far back to search (default 500)
+ * @returns {object|null} {start, end, callText, reactVar} or null
+ */
+function findCreateElementContaining(code, containsIdx, searchWindow = 500) {
+  const windowStart = Math.max(0, containsIdx - searchWindow);
+  const searchRegion = code.substring(windowStart, containsIdx);
+
+  // Find all ".createElement(" occurrences in the search region
+  let searchIdx = searchRegion.length;
+
+  while (searchIdx > 0) {
+    const relativeStart = searchRegion.lastIndexOf('.createElement(', searchIdx - 1);
+    if (relativeStart === -1) break;
+
+    const absoluteStart = windowStart + relativeStart;
+    const parenStart = absoluteStart + '.createElement'.length;
+    const parenEnd = findMatchingClose(code, parenStart);
+
+    // Check if containsIdx is within this createElement call
+    if (parenEnd !== -1 && absoluteStart <= containsIdx && containsIdx <= parenEnd) {
+      // Extract the React variable name before .createElement
+      const preCall = code.substring(Math.max(0, absoluteStart - 50), absoluteStart);
+      const reactVarMatch = preCall.match(/([A-Za-z0-9$_]+)\.default$/);
+
+      return {
+        start: absoluteStart,
+        end: parenEnd,
+        callText: code.substring(absoluteStart, parenEnd + 1),
+        reactVar: reactVarMatch ? reactVarMatch[1] : null
+      };
+    }
+    searchIdx = relativeStart;
+  }
+
+  return null;
+}
+
+/**
+ * Detect thinking content wrapper using stable anchors
+ * Uses "∴ Thinking…" and "paddingLeft:2" as anchors to find the content component
+ * @param {string} content - CLI.js file content
+ * @returns {object|null} Detection result with extracted variable names
+ */
+function detectThinkingContentAnchored(content) {
+  // Find the "∴ Thinking…" header anchor (expanded view header)
+  const headerAnchor = '"∴ Thinking…"';
+  const headerIdx = content.indexOf(headerAnchor);
+  if (headerIdx === -1) return null;
+
+  // The structure is:
+  // createElement(Box, {flexDirection:..., ...},
+  //   createElement(Text, {dimColor:!0,italic:!0}, "∴ Thinking…"),
+  //   createElement(Box, {paddingLeft:2},
+  //     createElement(ContentComp, null, contentVar)
+  //   )
+  // )
+
+  // Find paddingLeft:2 near the header (within 300 chars after)
+  const searchRegion = content.substring(headerIdx, headerIdx + 300);
+  const paddingIdx = searchRegion.indexOf('paddingLeft:2');
+  if (paddingIdx === -1) return null;
+
+  const absolutePaddingIdx = headerIdx + paddingIdx;
+
+  // Find the createElement call containing paddingLeft:2
+  const paddingCreateElement = findCreateElementContaining(content, absolutePaddingIdx);
+  if (!paddingCreateElement) return null;
+
+  // Inside this call, find the inner createElement for the content component
+  // Pattern: REACT.default.createElement(COMP,null,VAR) or REACT.default.createElement(COMP,{...},VAR)
+  const innerRegex = /([A-Za-z0-9$_]+)\.default\.createElement\(([A-Za-z0-9$_]+),(null|\{[^}]*\}),([A-Z])\)/;
+  const innerMatch = paddingCreateElement.callText.match(innerRegex);
+  if (!innerMatch) return null;
+
+  // Determine if patched by checking if props is not null
+  const isPatched = innerMatch[3] !== 'null';
+
+  return {
+    fullMatch: paddingCreateElement.callText,
+    reactVar: innerMatch[1],
+    wrapperElement: null, // We don't need this for the new approach
+    contentComponent: innerMatch[2],
+    contentProps: innerMatch[3],
+    contentVar: innerMatch[4],
+    callStart: paddingCreateElement.start,
+    callEnd: paddingCreateElement.end,
+    isPatched
+  };
+}
+
+/**
+ * Detect the content component function signature using the component name
+ * @param {string} content - CLI.js file content
+ * @param {string} componentName - Name of the content component (e.g., 'gK')
+ * @returns {object|null} Function info with extracted variable names
+ */
+function detectContentComponentFunction(content, componentName) {
+  // Find: function COMP({children:VAR})
+  const signatureRegex = new RegExp(
+    `function ${componentName}\\(\\{children:([A-Z])\\}\\)\\{`
+  );
+  const signatureMatch = content.match(signatureRegex);
+  if (!signatureMatch) return null;
+
+  const childrenVar = signatureMatch[1];
+  const funcStart = content.indexOf(signatureMatch[0]);
+
+  // Find the function body to extract internal variable names
+  // We need the React var and Text element used in push calls
+  // Pattern: ARRAY.push(REACT.default.createElement(TEXT,{key:...},STRING.trim()))
+
+  // Search within ~1000 chars of the function start for the push pattern
+  const funcRegion = content.substring(funcStart, funcStart + 1500);
+
+  // Generic push pattern that captures the actual variable names
+  const pushRegex = /([A-Z])\.push\(([A-Za-z0-9$_]+)\.default\.createElement\(([A-Za-z0-9$_]+),\{key:\1\.length\},([A-Z])\.trim\(\)\)\)/;
+  const pushMatch = funcRegion.match(pushRegex);
+
+  return {
+    signatureMatch: signatureMatch[0],
+    childrenVar,
+    funcStart,
+    // Push pattern info (may be null if not found)
+    pushInfo: pushMatch ? {
+      fullMatch: pushMatch[0],
+      arrayVar: pushMatch[1],
+      reactVar: pushMatch[2],
+      textElement: pushMatch[3],
+      stringVar: pushMatch[4]
+    } : null
+  };
+}
+
 if (HELP) {
   console.log(`
 🧠 Thinker - Claude Code Thinking Visibility Patch
@@ -77,9 +268,15 @@ Usage:
   node thinker.js --check                   Check if current version is patchable
 
 Theme presets:
-  watermelon       Green header + pink content 🍉
+  watermelon       Green header + magenta content 🍉
   emerald-saffron  Emerald header + gold content 🌿
-  bubblegum        Sky blue header + pink content 🫧
+  bubblegum        Sky blue header + magenta content 🫧
+  carrot           Orange header + green content 🥕
+  autumn           Amber header + burnt orange content 🍂
+  ocean            Seafoam header + teal content 🌊
+  forest           Moss header + emerald content 🌲
+  cherry-blossom   Pink header + soft rose content 🌸
+  cyberpunk        Yellow header + cyan content 🤖
 
 Color options:
   Named:  cyan, green, magenta, yellow, blue, red, white
@@ -236,12 +433,13 @@ function detectThinkingPatternV2(content) {
 
 // Detect the expanded thinking header (v2.1.x) for color patching
 function detectExpandedHeader(content) {
-  // Match: createElement(C,{dimColor:!0,italic:!0},"∴ Thinking…")
+  // Match: createElement($,{dimColor:!0,italic:!0},"∴ Thinking…") or createElement(C,...)
   // Also match if already patched with color (different prop order)
   // Unpatched: {dimColor:!0,italic:!0}
   // Patched: {italic:!0,color:"..."}
-  const regexUnpatched = /([\$A-Za-z0-9]+)\.default\.createElement\(([A-Z]),\{dimColor:!0,italic:!0\},"∴ Thinking…"\)/;
-  const regexPatched = /([\$A-Za-z0-9]+)\.default\.createElement\(([A-Z]),\{italic:!0,color:"[^"]+"\},"∴ Thinking…"\)/;
+  // Note: Text element can be $ or single letter like C
+  const regexUnpatched = /([\$A-Za-z0-9]+)\.default\.createElement\(([$A-Z]),\{dimColor:!0,italic:!0\},"∴ Thinking…"\)/;
+  const regexPatched = /([\$A-Za-z0-9]+)\.default\.createElement\(([$A-Z]),\{italic:!0,color:"[^"]+"\},"∴ Thinking…"\)/;
 
   let match = content.match(regexUnpatched);
   if (match) {
@@ -378,7 +576,16 @@ function main() {
   const thinkingInfoLegacy = detectThinkingPattern(content);
   const thinkingInfo = thinkingInfoV2 || thinkingInfoLegacy;
   const expandedHeaderInfo = detectExpandedHeader(content);
-  const thinkingContentInfo = detectThinkingContent(content);
+
+  // Try anchor-based detection first (more robust), fall back to regex-based
+  const thinkingContentAnchored = detectThinkingContentAnchored(content);
+  const thinkingContentRegex = detectThinkingContent(content);
+  const thinkingContentInfo = thinkingContentAnchored || thinkingContentRegex;
+
+  // Get content component function details if we found the content wrapper
+  const contentFuncInfo = thinkingContentInfo
+    ? detectContentComponentFunction(content, thinkingContentInfo.contentComponent)
+    : null;
 
   // Resolve colors from theme preset, individual presets, or use as-is
   let resolvedHeaderColor, resolvedContentColor;
@@ -419,7 +626,11 @@ function main() {
   }
 
   if (thinkingContentInfo) {
-    console.log(`   ✅ Thinking content: wrapper found (${thinkingContentInfo.contentComponent})`);
+    const detectionMethod = thinkingContentAnchored ? 'anchor-based' : 'regex-based';
+    console.log(`   ✅ Thinking content: wrapper found (${thinkingContentInfo.contentComponent}) [${detectionMethod}]`);
+    if (contentFuncInfo?.pushInfo) {
+      console.log(`   ✅ Content function: push pattern detected (${contentFuncInfo.pushInfo.textElement})`);
+    }
   } else {
     console.log('   ⚠️  Thinking content wrapper not detected');
   }
@@ -544,55 +755,97 @@ function main() {
     }
   }
 
-  // Patch 4: Custom color for thinking content
-  // We pass color as a prop to uV, then uV passes it to each t3 (Text) element
+  // Patch 4: Custom color for thinking content (ANCHOR-BASED)
+  // Uses dynamically extracted variable names instead of hardcoded ones
   // This uses Ink's native color prop which works reliably across line wraps
   if (resolvedContentColor && thinkingContentInfo) {
     if (thinkingContentInfo.isPatched) {
       console.log('   ⚠️  Content color already patched');
     } else {
       const colorValue = resolvedContentColor;
+      const contentComp = thinkingContentInfo.contentComponent; // dynamically detected
 
-      // Step 4a: Modify uV to accept color prop and pass it to t3 elements
-      // Find: function uV({children:A})
-      // Replace: function uV({children:A,color:$TC})
-      const uVSignatureRegex = /function uV\(\{children:([A-Z])\}\)/;
-      const uVMatch = patched.match(uVSignatureRegex);
+      // Step 4a: Modify content component to accept color prop
+      // Use contentFuncInfo if available (from anchor-based detection)
+      let childrenVar;
+      if (contentFuncInfo) {
+        childrenVar = contentFuncInfo.childrenVar;
+        // Replace the signature directly using the detected match
+        if (!DRY_RUN) {
+          const newSignature = `function ${contentComp}({children:${childrenVar},color:$TC}){`;
+          patched = patched.replace(contentFuncInfo.signatureMatch, newSignature);
+        }
+      } else {
+        // Fallback: detect signature with regex
+        const compSignatureRegex = new RegExp(`function ${contentComp}\\(\\{children:([A-Z])\\}\\)\\{`);
+        const compMatch = patched.match(compSignatureRegex);
+        if (compMatch) {
+          childrenVar = compMatch[1];
+          if (!DRY_RUN) {
+            const newSignature = `function ${contentComp}({children:${childrenVar},color:$TC}){`;
+            patched = patched.replace(compMatch[0], newSignature);
+          }
+        }
+      }
 
-      if (uVMatch) {
-        const childrenVar = uVMatch[1];
-        const newSignature = `function uV({children:${childrenVar},color:$TC})`;
-        patched = patched.replace(uVMatch[0], newSignature);
+      if (!childrenVar) {
+        console.log(`   ❌ Content color patch failed - ${contentComp} signature not found`);
+      } else {
+        // Step 4b: Find and wrap text elements with color
+        // Use dynamically detected variable names from contentFuncInfo
+        let flushPatched = false;
 
-        // Step 4b: Wrap t3 in C (Text) which accepts color prop
-        // t3 is a custom component that ignores color prop, but C cascades it
-        // Exact pattern from uV: Y.push(XV1.default.createElement(t3,{key:Y.length},J.trim()))
-        // Replace with: Y.push(XV1.default.createElement(C,{key:Y.length,color:$TC},XV1.default.createElement(t3,null,J.trim())))
+        if (contentFuncInfo?.pushInfo) {
+          // ANCHOR-BASED: Use extracted variable names
+          const { arrayVar, reactVar, textElement, stringVar } = contentFuncInfo.pushInfo;
 
-        // Match the exact flush pattern - variables may differ but structure is consistent
-        // Pattern: ARRAY.push(REACT.default.createElement(t3,{key:ARRAY.length},TEXT.trim()))
-        const flushRegex = /([A-Z])\.push\(([A-Za-z0-9$]+)\.default\.createElement\(t3,\{key:\1\.length\},([A-Z])\.trim\(\)\)\)/g;
+          // Build the exact pattern we detected
+          const exactPushPattern = contentFuncInfo.pushInfo.fullMatch;
 
-        patched = patched.replace(flushRegex, (match, arrayVar, reactVar, textVar) => {
-          // Wrap t3 in C with color prop
-          return `${arrayVar}.push(${reactVar}.default.createElement(C,{key:${arrayVar}.length,color:$TC},${reactVar}.default.createElement(t3,null,${textVar}.trim())))`;
-        });
+          // Build replacement with color wrapper, preserving the actual element names
+          // We wrap with a Text element that has color, using $ as Text (standard Ink)
+          // But we need to find the actual Text import name - use the same reactVar
+          const replacement = `${arrayVar}.push(${reactVar}.default.createElement($,{key:${arrayVar}.length,color:$TC},${reactVar}.default.createElement(${textElement},null,${stringVar}.trim())))`;
 
-        // Step 4c: Modify NbA to pass color to uV
-        // Find: createElement(uV,null,A) in the thinking content context
-        // Replace: createElement(uV,{color:'#ff69b4'},A)
-        const callPattern = `${thinkingContentInfo.reactVar}.default.createElement(${thinkingContentInfo.contentComponent},null,${thinkingContentInfo.contentVar})`;
-        const callReplacement = `${thinkingContentInfo.reactVar}.default.createElement(${thinkingContentInfo.contentComponent},{color:'${colorValue}'},${thinkingContentInfo.contentVar})`;
+          if (patched.includes(exactPushPattern)) {
+            if (!DRY_RUN) {
+              // Replace all occurrences (there may be multiple push calls)
+              patched = patched.split(exactPushPattern).join(replacement);
+            }
+            flushPatched = true;
+            console.log(`   ✅ Push pattern patched [anchor-based: ${textElement}]` + (DRY_RUN ? ' [DRY RUN]' : ''));
+          }
+        }
+
+        if (!flushPatched) {
+          // FALLBACK: Try generic regex pattern matching
+          // This is less robust but works as a fallback
+          const genericPushRegex = /([A-Z])\.push\(([A-Za-z0-9$_]+)\.default\.createElement\(([A-Za-z0-9$_]+),\{key:\1\.length\},([A-Z])\.trim\(\)\)\)/g;
+
+          if (genericPushRegex.test(patched)) {
+            if (!DRY_RUN) {
+              patched = patched.replace(genericPushRegex, (match, arrVar, rVar, textEl, strVar) => {
+                return `${arrVar}.push(${rVar}.default.createElement($,{key:${arrVar}.length,color:$TC},${rVar}.default.createElement(${textEl},null,${strVar}.trim())))`;
+              });
+            }
+            flushPatched = true;
+            console.log(`   ✅ Push pattern patched [regex fallback]` + (DRY_RUN ? ' [DRY RUN]' : ''));
+          }
+        }
+
+        // Step 4c: Modify the call site to pass color prop
+        const callPattern = `${thinkingContentInfo.reactVar}.default.createElement(${contentComp},null,${thinkingContentInfo.contentVar})`;
+        const callReplacement = `${thinkingContentInfo.reactVar}.default.createElement(${contentComp},{color:'${colorValue}'},${thinkingContentInfo.contentVar})`;
 
         if (patched.includes(callPattern)) {
-          patched = patched.replace(callPattern, callReplacement);
+          if (!DRY_RUN) {
+            patched = patched.replace(callPattern, callReplacement);
+          }
           patchCount++;
           console.log(`   ✅ Content color: ${resolvedContentColor} (via Ink color prop)` + (DRY_RUN ? ' [DRY RUN]' : ''));
         } else {
-          console.log('   ❌ Content color patch failed - uV call pattern mismatch');
+          console.log(`   ❌ Content color patch failed - ${contentComp} call pattern mismatch`);
         }
-      } else {
-        console.log('   ❌ Content color patch failed - uV signature not found');
       }
     }
   }
