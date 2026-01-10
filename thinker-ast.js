@@ -1,0 +1,1298 @@
+#!/usr/bin/env node
+/**
+ * Claude Code Thinking Visibility Patch - "Thinker" (AST-based)
+ *
+ * Uses AST parsing with stable string anchors instead of fragile regex.
+ * More robust against minifier changes.
+ *
+ * Usage:
+ *   node thinker-ast.js           # Apply patch
+ *   node thinker-ast.js --dry-run # Preview changes
+ *   node thinker-ast.js --restore # Restore from backup
+ *   node thinker-ast.js --check   # Check if patchable
+ */
+
+const fs = require('fs');
+const path = require('path');
+const crypto = require('crypto');
+const { execSync } = require('child_process');
+const acorn = require('acorn');
+const walk = require('acorn-walk');
+const MagicString = require('magic-string');
+
+// ============================================
+// PHASE 1: FOUNDATION - CLI & CONFIGURATION
+// ============================================
+
+const args = process.argv.slice(2);
+const DRY_RUN = args.includes('--dry-run');
+const RESTORE = args.includes('--restore');
+const CHECK_ONLY = args.includes('--check');
+const HELP = args.includes('--help') || args.includes('-h');
+const DEBUG = args.includes('--debug');
+
+// Parse --color=<value> argument (for header)
+const colorArg = args.find(a => a.startsWith('--color='));
+const CUSTOM_COLOR = colorArg ? colorArg.split('=')[1] : null;
+
+// Parse --content-color=<value> argument (for thinking body)
+const contentColorArg = args.find(a => a.startsWith('--content-color='));
+const CONTENT_COLOR = contentColorArg ? contentColorArg.split('=')[1] : null;
+
+// Parse --theme=<value> argument (for preset theme combos)
+const themeArg = args.find(a => a.startsWith('--theme='));
+const THEME = themeArg ? themeArg.split('=')[1] : null;
+
+// Theme presets (header + content)
+const THEME_PRESETS = {
+  'watermelon': { header: '#32cd32', content: '#FF77FF' },
+  'emerald-saffron': { header: '#00C853', content: '#F4C24D' },
+  'bubblegum': { header: '#87ceeb', content: '#FF77FF' },
+  'carrot': { header: '#ff8c00', content: '#32cd32' },
+  'autumn': { header: '#FFBF00', content: '#D2691E' },
+  'ocean': { header: '#98D8C8', content: '#20B2AA' },
+  'forest': { header: '#90EE90', content: '#228B22' },
+  'cherry-blossom': { header: '#FF69B4', content: '#FFB6C1' },
+  'cyberpunk': { header: '#FCE300', content: '#00F0FF' },
+};
+
+// Color presets
+const COLOR_PRESETS = {
+  'dim': null,
+  'cyan': '#00ffff',
+  'green': '#32cd32',
+  'magenta': '#ff00ff',
+  'yellow': '#ffff00',
+  'blue': '#4169e1',
+  'red': '#ff4444',
+  'white': '#ffffff',
+  'pink': '#ff69b4',
+  'orange': '#ff8c00',
+  'purple': '#9370db',
+  'teal': '#20b2aa',
+  'gold': '#ffd700',
+  'lime': '#00ff00',
+  'coral': '#ff7f50',
+  'sky': '#87ceeb',
+};
+
+/**
+ * Validate and normalize a color value
+ * Security: Prevents code injection through color values
+ * @param {string} color - Color name or hex value
+ * @returns {string} - Validated color value
+ * @throws {Error} - If color is invalid
+ */
+function validateColor(color) {
+  if (color === null || color === undefined) return null;
+
+  // Check preset colors (use hasOwnProperty to avoid prototype pollution)
+  if (Object.prototype.hasOwnProperty.call(COLOR_PRESETS, color)) {
+    return COLOR_PRESETS[color];
+  }
+
+  // Only allow valid hex: #RGB or #RRGGBB (not #RGBA or #RRGGBBAA)
+  if (/^#([0-9a-fA-F]{3}|[0-9a-fA-F]{6})$/.test(color)) {
+    return color;
+  }
+
+  throw new Error(`Invalid color "${color}". Use a preset name or hex value (#RGB or #RRGGBB).`);
+}
+
+// Exit codes
+const EXIT = {
+  SUCCESS: 0,
+  GENERAL_ERROR: 1,
+  AMBIGUOUS: 2,
+  VERIFICATION_FAILED: 3,
+  ALREADY_PATCHED: 4,
+};
+
+function debug(...args) {
+  if (DEBUG) console.log('[DEBUG]', ...args);
+}
+
+if (HELP) {
+  console.log(`
+🧠 Thinker (AST) - Claude Code Thinking Visibility Patch
+
+Usage:
+  node thinker-ast.js                       Apply the patch (default dim gray)
+  node thinker-ast.js --theme=watermelon    Apply preset theme
+  node thinker-ast.js --color=green         Apply with custom header color
+  node thinker-ast.js --content-color=pink  Apply with custom content color
+  node thinker-ast.js --dry-run             Preview changes without applying
+  node thinker-ast.js --restore             Restore from backup
+  node thinker-ast.js --check               Check if current version is patchable
+  node thinker-ast.js --debug               Show debug output
+
+Theme presets:
+  watermelon, emerald-saffron, bubblegum, carrot, autumn,
+  ocean, forest, cherry-blossom, cyberpunk
+
+Color options:
+  Named:  cyan, green, magenta, yellow, blue, red, white
+  Presets: pink, orange, purple, teal, gold, lime, coral, sky
+  Hex:    #ff69b4, #4ecdc4, etc.
+
+What it does:
+  1. Removes the collapsed "∴ Thinking..." banner
+  2. Forces thinking content to display inline automatically
+  3. Optionally applies custom colors to header and content
+  `);
+  process.exit(EXIT.SUCCESS);
+}
+
+// ============================================
+// PHASE 1: FILE DISCOVERY
+// ============================================
+
+function findClaudeCode() {
+  const searchPaths = [];
+
+  // 1. Check symlink from 'which claude'
+  try {
+    const claudePath = execSync('which claude', { encoding: 'utf8' }).trim();
+    const realPath = fs.realpathSync(claudePath);
+    searchPaths.push(realPath);
+    searchPaths.push(path.dirname(realPath) + '/cli.js');
+  } catch (e) {}
+
+  // 2. Global npm
+  try {
+    const npmRoot = execSync('npm root -g', { encoding: 'utf8' }).trim();
+    searchPaths.push(path.join(npmRoot, '@anthropic-ai/claude-code/cli.js'));
+  } catch (e) {}
+
+  // 3. Local installations
+  const home = process.env.HOME || process.env.USERPROFILE;
+  searchPaths.push(
+    path.join(home, '.claude/local/node_modules/@anthropic-ai/claude-code/cli.js'),
+    path.join(home, '.config/claude/local/node_modules/@anthropic-ai/claude-code/cli.js')
+  );
+
+  for (const p of searchPaths) {
+    if (fs.existsSync(p) && p.endsWith('cli.js')) {
+      return p;
+    }
+  }
+
+  return null;
+}
+
+function getVersion(content) {
+  const match = content.match(/\/\/ Version: ([\d.]+)/);
+  return match ? match[1] : 'unknown';
+}
+
+// ============================================
+// PHASE 1: SAFETY UTILITIES
+// ============================================
+
+function atomicWrite(targetPath, content, backupPath) {
+  // Step 1: Create backup if doesn't exist
+  if (!fs.existsSync(backupPath)) {
+    fs.copyFileSync(targetPath, backupPath);
+    console.log(`💾 Backup created: ${backupPath}`);
+  } else {
+    console.log(`💾 Backup exists: ${backupPath}`);
+  }
+
+  // Step 2: Preserve original file permissions
+  const originalStats = fs.statSync(targetPath);
+  const originalMode = originalStats.mode;
+
+  // Step 3: Write to temp file in same directory
+  const tempPath = targetPath + '.tmp.' + crypto.randomBytes(4).toString('hex');
+  const fd = fs.openSync(tempPath, 'w');
+  fs.writeSync(fd, content);
+  fs.fsyncSync(fd);
+  fs.closeSync(fd);
+
+  // Step 4: Restore original permissions on temp file
+  fs.chmodSync(tempPath, originalMode);
+
+  // Step 5: Atomic rename
+  fs.renameSync(tempPath, targetPath);
+  return true;
+}
+
+function restoreFromBackup(cliPath, backupPath) {
+  if (!fs.existsSync(backupPath)) {
+    console.error('❌ No backup found at:', backupPath);
+    return false;
+  }
+  fs.copyFileSync(backupPath, cliPath);
+  console.log('✅ Restored from backup');
+  return true;
+}
+
+// ============================================
+// PHASE 2: AST DETECTION ENGINE
+// ============================================
+
+function parseWithAcorn(code) {
+  try {
+    return acorn.parse(code, {
+      ecmaVersion: 2022,
+      sourceType: 'script',
+      allowHashBang: true,
+      allowReserved: true,
+    });
+  } catch (e) {
+    debug('Standard parse failed, trying with module type:', e.message);
+    try {
+      return acorn.parse(code, {
+        ecmaVersion: 2022,
+        sourceType: 'module',
+        allowHashBang: true,
+        allowReserved: true,
+      });
+    } catch (e2) {
+      console.error('❌ Failed to parse cli.js:', e2.message);
+      return null;
+    }
+  }
+}
+
+// ============================================
+// PHASE 2A: AST HELPER FUNCTIONS
+// ============================================
+
+/**
+ * Check if a CallExpression is a createElement call
+ * Handles various minified forms:
+ * - a.createElement(...)
+ * - a.default.createElement(...)
+ * - (0, a.createElement)(...)
+ * - a["createElement"](...)
+ */
+function isCreateElementCall(node) {
+  if (node.type !== 'CallExpression') return false;
+  let callee = node.callee;
+
+  // Unwrap SequenceExpression: (0, a.createElement)(...)
+  if (callee.type === 'SequenceExpression') {
+    callee = callee.expressions[callee.expressions.length - 1];
+  }
+
+  // Handle MemberExpression: a.createElement or a["createElement"]
+  if (callee.type === 'MemberExpression') {
+    const prop = callee.property;
+    // Check for .createElement
+    if (prop.type === 'Identifier' && prop.name === 'createElement') return true;
+    // Check for ["createElement"]
+    if (prop.type === 'Literal' && prop.value === 'createElement') return true;
+
+    // Check for .default.createElement (nested MemberExpression)
+    // e.g., React.default.createElement
+    if (callee.object.type === 'MemberExpression') {
+      const innerProp = callee.object.property;
+      if (innerProp.type === 'Identifier' && innerProp.name === 'default') {
+        if (prop.type === 'Identifier' && prop.name === 'createElement') return true;
+      }
+    }
+  }
+
+  return false;
+}
+
+/**
+ * Get property from ObjectExpression by key name (order-independent)
+ * Returns the Property node or null if not found
+ */
+function findObjectProperty(objExpr, keyName) {
+  if (!objExpr || objExpr.type !== 'ObjectExpression') return null;
+
+  for (const prop of objExpr.properties) {
+    if (prop.type !== 'Property') continue;
+
+    // Handle identifier keys: { dimColor: true }
+    if (prop.key.type === 'Identifier' && prop.key.name === keyName) {
+      return prop;
+    }
+    // Handle string literal keys: { "dimColor": true }
+    if (prop.key.type === 'Literal' && prop.key.value === keyName) {
+      return prop;
+    }
+  }
+  return null;
+}
+
+/**
+ * Walk ancestors array to find specific node type (nearest first)
+ * Returns { node, index } or null
+ */
+function findAncestorOfType(ancestors, type) {
+  // Walk from end (closest to target) to beginning
+  for (let i = ancestors.length - 2; i >= 0; i--) {
+    if (ancestors[i].type === type) {
+      return { node: ancestors[i], index: i };
+    }
+  }
+  return null;
+}
+
+/**
+ * Determine which argument index contains a given node position
+ * Returns the index (0-based) or -1 if not found
+ */
+function containingArgIndex(callExpr, nodeStart, nodeEnd) {
+  if (!callExpr.arguments) return -1;
+
+  for (let i = 0; i < callExpr.arguments.length; i++) {
+    const arg = callExpr.arguments[i];
+    if (nodeStart >= arg.start && nodeEnd <= arg.end) {
+      return i;
+    }
+  }
+  return -1;
+}
+
+/**
+ * Extract the React variable name from a createElement call
+ * e.g., "lZ1" from "lZ1.default.createElement(...)"
+ */
+function getReactVarFromCall(callExpr) {
+  let callee = callExpr.callee;
+
+  // Unwrap SequenceExpression
+  if (callee.type === 'SequenceExpression') {
+    callee = callee.expressions[callee.expressions.length - 1];
+  }
+
+  if (callee.type !== 'MemberExpression') return null;
+
+  // Navigate to the root object
+  let obj = callee.object;
+  while (obj.type === 'MemberExpression') {
+    obj = obj.object;
+  }
+
+  if (obj.type === 'Identifier') {
+    return obj.name;
+  }
+  return null;
+}
+
+/**
+ * Find all string literals matching a value using walk.simple
+ */
+function findStringLiterals(ast, value) {
+  const matches = [];
+  walk.simple(ast, {
+    Literal(node) {
+      if (node.value === value) {
+        matches.push(node);
+      }
+    }
+  });
+  return matches;
+}
+
+/**
+ * Find string literals with ancestor information using walk.ancestor
+ */
+function findStringLiteralsWithAncestors(ast, value) {
+  const matches = [];
+  walk.ancestor(ast, {
+    Literal(node, ancestors) {
+      if (node.value === value) {
+        matches.push({ node, ancestors: [...ancestors] });
+      }
+    }
+  });
+  return matches;
+}
+
+/**
+ * Find the expanded header "∴ Thinking…" createElement call
+ * Uses proper AST traversal instead of regex
+ * Returns: { callExpr, propsNode, reactVar, textElement, propsStart, propsEnd, isPatched }
+ */
+function findExpandedHeader(ast, code) {
+  const matches = findStringLiteralsWithAncestors(ast, '∴ Thinking…');
+  debug(`Found ${matches.length} "∴ Thinking…" literals`);
+
+  if (matches.length === 0) {
+    return { error: 'NOT_FOUND', count: 0 };
+  }
+
+  // Find matches that are children of createElement calls
+  const validMatches = [];
+
+  for (const { node: literal, ancestors } of matches) {
+    // Walk up ancestors to find first CallExpression that is a createElement call
+    // (not just the nearest CallExpression, which could be e.g. "∴ Thinking…".slice())
+    let callExpr = null;
+    for (let i = ancestors.length - 2; i >= 0; i--) {
+      if (ancestors[i].type === 'CallExpression' && isCreateElementCall(ancestors[i])) {
+        callExpr = ancestors[i];
+        break;
+      }
+    }
+    if (!callExpr) continue;
+
+    // Verify the literal is in a child position (arguments[2+])
+    // The literal should be the text content, not the type or props
+    const argIndex = containingArgIndex(callExpr, literal.start, literal.end);
+
+    // For createElement(Type, props, ...children), children start at index 2
+    // Reject if in type (0) or props (1) position - must be in children
+    if (argIndex < 2) continue;
+
+    // Get the props node (arguments[1])
+    const propsNode = callExpr.arguments[1];
+    if (!propsNode) continue;
+
+    // Extract the text element type (arguments[0])
+    const typeArg = callExpr.arguments[0];
+    let textElement = null;
+    if (typeArg.type === 'Identifier') {
+      textElement = typeArg.name;
+    }
+
+    // Extract React variable name
+    const reactVar = getReactVarFromCall(callExpr);
+
+    // Determine if already patched by checking for 'color' property in props
+    let isPatched = false;
+    if (propsNode.type === 'ObjectExpression') {
+      const colorProp = findObjectProperty(propsNode, 'color');
+      isPatched = colorProp !== null;
+    }
+
+    validMatches.push({
+      literal,
+      callExpr,
+      propsNode,
+      reactVar,
+      textElement,
+      isPatched
+    });
+  }
+
+  if (validMatches.length === 0) {
+    debug('No valid createElement calls found containing "∴ Thinking…"');
+    return { error: 'PATTERN_MISMATCH' };
+  }
+
+  if (validMatches.length > 1) {
+    debug(`Ambiguous: found ${validMatches.length} potential header locations`);
+    return { error: 'AMBIGUOUS', count: validMatches.length };
+  }
+
+  const match = validMatches[0];
+
+  return {
+    success: true,
+    literal: match.literal,
+    callExpr: match.callExpr,
+    propsNode: match.propsNode,
+    reactVar: match.reactVar,
+    textElement: match.textElement,
+    propsStart: match.propsNode.start,
+    propsEnd: match.propsNode.end,
+    isPatched: match.isPatched
+  };
+}
+
+/**
+ * Find the collapsed view with "∴ Thinking (" and the guard condition
+ * Uses proper AST traversal instead of regex
+ * Returns: { ifStmt, conditionStart, conditionEnd, isPatched }
+ */
+function findCollapsedView(ast, code) {
+  const matches = findStringLiteralsWithAncestors(ast, '∴ Thinking (');
+  debug(`Found ${matches.length} "∴ Thinking (" literals`);
+
+  if (matches.length === 0) {
+    return { error: 'NOT_FOUND', count: 0 };
+  }
+
+  // Find the IfStatement guard for each match
+  const validMatches = [];
+
+  for (const { node: literal, ancestors } of matches) {
+    // Walk up ancestors to find IfStatement
+    const ifResult = findAncestorOfType(ancestors, 'IfStatement');
+    if (!ifResult) continue;
+
+    const ifStmt = ifResult.node;
+    const test = ifStmt.test;
+
+    // Check if already patched: if(!1) - UnaryExpression with Literal 1
+    if (test.type === 'UnaryExpression' && test.operator === '!' &&
+        test.argument.type === 'Literal' && test.argument.value === 1) {
+      validMatches.push({
+        literal,
+        ifStmt,
+        isPatched: true
+      });
+      continue;
+    }
+
+    // Check for unpatched guard: !(VAR||VAR)
+    // Structure: UnaryExpression(!) -> LogicalExpression(||)
+    if (test.type === 'UnaryExpression' && test.operator === '!') {
+      const arg = test.argument;
+
+      // Could be !(A||B) or !A (simpler form)
+      if (arg.type === 'LogicalExpression' && arg.operator === '||') {
+        // Extract variable names (for debugging, not for assumptions)
+        let transcriptVar = null, verboseVar = null;
+        if (arg.left.type === 'Identifier') transcriptVar = arg.left.name;
+        if (arg.right.type === 'Identifier') verboseVar = arg.right.name;
+
+        validMatches.push({
+          literal,
+          ifStmt,
+          conditionStart: test.start,
+          conditionEnd: test.end,
+          transcriptVar,
+          verboseVar,
+          isPatched: false
+        });
+        continue;
+      }
+
+      // Handle simpler form: !VAR
+      if (arg.type === 'Identifier') {
+        validMatches.push({
+          literal,
+          ifStmt,
+          conditionStart: test.start,
+          conditionEnd: test.end,
+          transcriptVar: arg.name,
+          verboseVar: null,
+          isPatched: false
+        });
+        continue;
+      }
+    }
+  }
+
+  if (validMatches.length === 0) {
+    debug('No valid guard patterns found for collapsed view');
+    return { error: 'PATTERN_MISMATCH' };
+  }
+
+  if (validMatches.length > 1) {
+    // If all matches are patched, that's fine - return the first
+    const unpatchedMatches = validMatches.filter(m => !m.isPatched);
+    if (unpatchedMatches.length > 1) {
+      debug(`Ambiguous: found ${unpatchedMatches.length} unpatched collapsed view guards`);
+      return { error: 'AMBIGUOUS', count: unpatchedMatches.length };
+    }
+    // Either 1 unpatched or all patched - use first unpatched or first patched
+    const match = unpatchedMatches[0] || validMatches[0];
+    return {
+      success: true,
+      ifStmt: match.ifStmt,
+      conditionStart: match.conditionStart,
+      conditionEnd: match.conditionEnd,
+      transcriptVar: match.transcriptVar,
+      verboseVar: match.verboseVar,
+      isPatched: match.isPatched
+    };
+  }
+
+  const match = validMatches[0];
+
+  return {
+    success: true,
+    ifStmt: match.ifStmt,
+    conditionStart: match.conditionStart,
+    conditionEnd: match.conditionEnd,
+    transcriptVar: match.transcriptVar,
+    verboseVar: match.verboseVar,
+    isPatched: match.isPatched
+  };
+}
+
+/**
+ * Find the switch case for "thinking" in the message renderer
+ * Uses proper AST traversal to find SwitchCase with test.value === "thinking"
+ * Disambiguates by checking for isTranscriptMode property in the consequent
+ * Returns: { switchCase, guardNode, propsNode, isPatched }
+ */
+function findSwitchCase(ast, code) {
+  // Find all SwitchCase nodes with test value "thinking"
+  const thinkingCases = [];
+
+  walk.simple(ast, {
+    SwitchCase(node) {
+      // Check if this is case "thinking":
+      if (node.test && node.test.type === 'Literal' && node.test.value === 'thinking') {
+        thinkingCases.push(node);
+      }
+    }
+  });
+
+  debug(`Found ${thinkingCases.length} case "thinking" statements`);
+
+  if (thinkingCases.length === 0) {
+    return { error: 'NOT_FOUND' };
+  }
+
+  // Find the right one by looking for isTranscriptMode property
+  const validCases = [];
+
+  for (const switchCase of thinkingCases) {
+    // The consequent is an array of statements
+    let statements = switchCase.consequent;
+    if (!statements || statements.length === 0) continue;
+
+    // Unwrap BlockStatement if the case body is wrapped: case "thinking": { ... }
+    if (statements.length === 1 && statements[0].type === 'BlockStatement') {
+      statements = statements[0].body;
+    }
+
+    // Look for IfStatement guard and ReturnStatement with createElement
+    let guardNode = null;
+    let returnNode = null;
+    let propsNode = null;
+    let hasIsTranscriptMode = false;
+
+    for (const stmt of statements) {
+      // Look for guard: if(!VAR&&!VAR)return null;
+      if (stmt.type === 'IfStatement') {
+        guardNode = stmt;
+      }
+
+      // Look for return with createElement
+      if (stmt.type === 'ReturnStatement' && stmt.argument) {
+        const arg = stmt.argument;
+        if (isCreateElementCall(arg)) {
+          returnNode = stmt;
+
+          // Get props node (arguments[1])
+          if (arg.arguments && arg.arguments[1]) {
+            propsNode = arg.arguments[1];
+
+            // Check for isTranscriptMode property
+            if (propsNode.type === 'ObjectExpression') {
+              const transcriptProp = findObjectProperty(propsNode, 'isTranscriptMode');
+              if (transcriptProp) {
+                hasIsTranscriptMode = true;
+              }
+            }
+          }
+        }
+      }
+    }
+
+    // We want the case that has isTranscriptMode
+    if (hasIsTranscriptMode && returnNode) {
+      // Check if already patched by examining isTranscriptMode value
+      // Patched = isTranscriptMode:!0 (forced true)
+      // Don't assume missing guard means patched - check actual value
+      let isPatched = false;
+
+      if (propsNode?.type === 'ObjectExpression') {
+        const transcriptProp = findObjectProperty(propsNode, 'isTranscriptMode');
+        if (transcriptProp && transcriptProp.value.type === 'UnaryExpression' &&
+            transcriptProp.value.operator === '!' &&
+            transcriptProp.value.argument.type === 'Literal' &&
+            transcriptProp.value.argument.value === 0) {
+          // isTranscriptMode:!0 means forced true = patched
+          isPatched = true;
+        }
+      }
+
+      validCases.push({
+        switchCase,
+        guardNode,
+        returnNode,
+        propsNode,
+        hasIsTranscriptMode,
+        isPatched
+      });
+    }
+  }
+
+  if (validCases.length === 0) {
+    debug('No switch case with isTranscriptMode property found');
+    return { error: 'PATTERN_MISMATCH' };
+  }
+
+  if (validCases.length > 1) {
+    const unpatchedCases = validCases.filter(c => !c.isPatched);
+    if (unpatchedCases.length > 1) {
+      debug(`Ambiguous: found ${unpatchedCases.length} unpatched thinking switch cases`);
+      return { error: 'AMBIGUOUS', count: unpatchedCases.length };
+    }
+    // Use first unpatched or first if all patched
+    const selected = unpatchedCases[0] || validCases[0];
+    return buildSwitchCaseResult(selected);
+  }
+
+  return buildSwitchCaseResult(validCases[0]);
+}
+
+/**
+ * Helper to build switch case result object
+ */
+function buildSwitchCaseResult(match) {
+  const result = {
+    success: true,
+    switchCase: match.switchCase,
+    propsNode: match.propsNode,
+    isPatched: match.isPatched
+  };
+
+  if (match.guardNode && !match.isPatched) {
+    result.guardStart = match.guardNode.start;
+    result.guardEnd = match.guardNode.end;
+    result.guardNode = match.guardNode;
+  }
+
+  if (match.propsNode) {
+    result.propsStart = match.propsNode.start;
+    result.propsEnd = match.propsNode.end;
+  }
+
+  return result;
+}
+
+/**
+ * Find the content wrapper with paddingLeft property near the thinking header
+ * Uses AST navigation instead of regex
+ * Returns: { wrapperCall, contentCall, contentComponent, isPatched }
+ */
+function findContentWrapper(ast, code) {
+  // Find "∴ Thinking…" header first as anchor
+  const headerResult = findExpandedHeader(ast, code);
+  if (!headerResult.success) {
+    return { error: 'HEADER_NOT_FOUND' };
+  }
+
+  // Find all createElement calls with paddingLeft in props that are after the header
+  const headerEnd = headerResult.literal.end;
+  const candidateWrappers = [];
+
+  walk.simple(ast, {
+    CallExpression(node) {
+      // Must be after header and within reasonable distance
+      if (node.start < headerEnd || node.start > headerEnd + 500) return;
+
+      // Must be a createElement call
+      if (!isCreateElementCall(node)) return;
+
+      // Must have props with paddingLeft
+      const propsArg = node.arguments[1];
+      if (!propsArg || propsArg.type !== 'ObjectExpression') return;
+
+      const paddingLeftProp = findObjectProperty(propsArg, 'paddingLeft');
+      if (!paddingLeftProp) return;
+
+      // Look for nested createElement call in children (arguments[2+])
+      for (let i = 2; i < node.arguments.length; i++) {
+        const childArg = node.arguments[i];
+        if (isCreateElementCall(childArg)) {
+          // This is the content component createElement
+          const contentCall = childArg;
+          const contentPropsArg = contentCall.arguments[1];
+
+          // Extract content component name
+          let contentComponent = null;
+          const typeArg = contentCall.arguments[0];
+          if (typeArg?.type === 'Identifier') {
+            contentComponent = typeArg.name;
+          }
+
+          // Extract content variable (the children of content component)
+          let contentVar = null;
+          if (contentCall.arguments[2]?.type === 'Identifier') {
+            contentVar = contentCall.arguments[2].name;
+          }
+
+          // Check if patched - content component has color prop
+          let isPatched = false;
+          if (contentPropsArg?.type === 'ObjectExpression') {
+            const colorProp = findObjectProperty(contentPropsArg, 'color');
+            isPatched = colorProp !== null;
+          }
+
+          candidateWrappers.push({
+            wrapperCall: node,
+            contentCall,
+            contentComponent,
+            contentVar,
+            contentPropsNode: contentPropsArg,
+            reactVar: getReactVarFromCall(node),
+            isPatched
+          });
+        }
+      }
+    }
+  });
+
+  if (candidateWrappers.length === 0) {
+    debug('No content wrapper with paddingLeft found near header');
+    return { error: 'PATTERN_MISMATCH' };
+  }
+
+  // Use the first (closest) candidate
+  const match = candidateWrappers[0];
+
+  return {
+    success: true,
+    wrapperCall: match.wrapperCall,
+    contentCall: match.contentCall,
+    contentComponent: match.contentComponent,
+    contentVar: match.contentVar,
+    contentPropsNode: match.contentPropsNode,
+    reactVar: match.reactVar,
+    callStart: match.wrapperCall.start,
+    callEnd: match.wrapperCall.end,
+    isPatched: match.isPatched
+  };
+}
+
+/**
+ * Find the content component function to inject color prop
+ * Uses AST to find the function declaration by name
+ */
+function findContentComponentFunction(ast, code, componentName) {
+  let funcNode = null;
+  let childrenVar = null;
+
+  walk.simple(ast, {
+    FunctionDeclaration(node) {
+      if (node.id?.name === componentName) {
+        funcNode = node;
+
+        // Extract children parameter name from destructuring
+        // function COMP({children:VAR}){
+        if (node.params[0]?.type === 'ObjectPattern') {
+          for (const prop of node.params[0].properties) {
+            if (prop.key?.name === 'children' && prop.value?.type === 'Identifier') {
+              childrenVar = prop.value.name;
+              break;
+            }
+          }
+        }
+      }
+    }
+  });
+
+  if (!funcNode) {
+    debug(`Content component function ${componentName} not found`);
+    return null;
+  }
+
+  return {
+    funcNode,
+    childrenVar,
+    paramsNode: funcNode.params[0],
+    paramsStart: funcNode.params[0]?.start,
+    paramsEnd: funcNode.params[0]?.end,
+    bodyStart: funcNode.body?.start,
+    bodyEnd: funcNode.body?.end
+  };
+}
+
+/**
+ * Find the push pattern inside content component for color wrapping
+ * Uses AST to find .push() CallExpressions with createElement arguments
+ */
+function findPushPattern(ast, code, componentName) {
+  // First find the function
+  const funcInfo = findContentComponentFunction(ast, code, componentName);
+  if (!funcInfo) return null;
+
+  const funcNode = funcInfo.funcNode;
+  const pushPatterns = [];
+
+  // Walk the function body to find .push() calls
+  walk.simple(funcNode.body, {
+    CallExpression(node) {
+      // Check if this is a .push() call
+      if (node.callee?.type !== 'MemberExpression') return;
+      if (node.callee.property?.type !== 'Identifier') return;
+      if (node.callee.property.name !== 'push') return;
+
+      // Get the array variable name
+      let arrayVar = null;
+      if (node.callee.object?.type === 'Identifier') {
+        arrayVar = node.callee.object.name;
+      }
+      if (!arrayVar) return;
+
+      // The argument should be a createElement call
+      const pushArg = node.arguments[0];
+      if (!pushArg || !isCreateElementCall(pushArg)) return;
+
+      // Extract information from the createElement call
+      const createCall = pushArg;
+      const reactVar = getReactVarFromCall(createCall);
+
+      // Get the text element type
+      let textElement = null;
+      if (createCall.arguments[0]?.type === 'Identifier') {
+        textElement = createCall.arguments[0].name;
+      }
+
+      // Get props - should have key property
+      const propsArg = createCall.arguments[1];
+      if (!propsArg || propsArg.type !== 'ObjectExpression') return;
+
+      const keyProp = findObjectProperty(propsArg, 'key');
+      if (!keyProp) return;
+
+      // Get the string variable (should be in the children, calling .trim())
+      let stringVar = null;
+      const childArg = createCall.arguments[2];
+      if (childArg?.type === 'CallExpression' &&
+          childArg.callee?.type === 'MemberExpression' &&
+          childArg.callee.property?.name === 'trim' &&
+          childArg.callee.object?.type === 'Identifier') {
+        stringVar = childArg.callee.object.name;
+      }
+
+      pushPatterns.push({
+        callNode: node,
+        createElementNode: createCall,
+        arrayVar,
+        reactVar,
+        textElement,
+        stringVar,
+        propsNode: propsArg,
+        position: node.start,
+        end: node.end
+      });
+    }
+  });
+
+  if (pushPatterns.length === 0) {
+    debug('No push pattern found in content component');
+    return null;
+  }
+
+  debug(`Found ${pushPatterns.length} push patterns in ${componentName}`);
+  return { patterns: pushPatterns, funcInfo };
+}
+
+// ============================================
+// PHASE 3: PATCHING ENGINE
+// ============================================
+
+function resolveColors() {
+  let headerColor, contentColor;
+
+  if (THEME && THEME_PRESETS[THEME]) {
+    // Theme presets are pre-validated, but validate anyway for safety
+    headerColor = validateColor(THEME_PRESETS[THEME].header);
+    contentColor = validateColor(THEME_PRESETS[THEME].content);
+  } else {
+    // Validate user-provided colors (throws on invalid input)
+    headerColor = CUSTOM_COLOR ? validateColor(CUSTOM_COLOR) : null;
+    contentColor = CONTENT_COLOR
+      ? validateColor(CONTENT_COLOR)
+      : headerColor;
+  }
+
+  return { headerColor, contentColor };
+}
+
+function applyPatches(code, ast, detections, colors) {
+  const ms = new MagicString(code);
+  const patches = [];
+
+  // Patch 1: Disable collapsed view guard
+  if (detections.collapsedView.success && !detections.collapsedView.isPatched) {
+    const cv = detections.collapsedView;
+    // Replace !(VAR||VAR) with !1
+    ms.overwrite(cv.conditionStart, cv.conditionEnd, '!1');
+    patches.push('Collapsed view guard disabled');
+  } else if (detections.collapsedView.isPatched) {
+    patches.push('Collapsed view guard (already patched)');
+  }
+
+  // Patch 2: Force transcript mode in switch case
+  if (detections.switchCase.success && !detections.switchCase.isPatched) {
+    const sc = detections.switchCase;
+
+    // Remove the guard: if(!VAR&&!VAR)return null;
+    if (sc.guardStart && sc.guardEnd) {
+      ms.remove(sc.guardStart, sc.guardEnd);
+    }
+
+    // Use AST to modify props - find isTranscriptMode and hideInTranscript properties
+    if (sc.propsNode?.type === 'ObjectExpression') {
+      const transcriptProp = findObjectProperty(sc.propsNode, 'isTranscriptMode');
+      const hideProp = findObjectProperty(sc.propsNode, 'hideInTranscript');
+
+      if (transcriptProp) {
+        // Replace the value with !0 (true)
+        ms.overwrite(transcriptProp.value.start, transcriptProp.value.end, '!0');
+      }
+      if (hideProp) {
+        // Replace the value with !1 (false)
+        ms.overwrite(hideProp.value.start, hideProp.value.end, '!1');
+      }
+    }
+
+    patches.push('Switch case: transcript mode forced');
+  } else if (detections.switchCase.isPatched) {
+    patches.push('Switch case (already patched)');
+  }
+
+  // Patch 3: Header color (optional)
+  if (colors.headerColor && detections.expandedHeader.success && !detections.expandedHeader.isPatched) {
+    const eh = detections.expandedHeader;
+    const newProps = `{italic:!0,color:"${colors.headerColor}"}`;
+    ms.overwrite(eh.propsStart, eh.propsEnd, newProps);
+    patches.push(`Header color: ${colors.headerColor}`);
+  } else if (colors.headerColor && detections.expandedHeader.isPatched) {
+    patches.push('Header color (already patched)');
+  }
+
+  // Patch 4: Content color (optional)
+  if (colors.contentColor && detections.contentWrapper.success && !detections.contentWrapper.isPatched) {
+    const cw = detections.contentWrapper;
+
+    // Step 4a: Modify the content component's props using AST positions
+    // Change from null to {color:'...'}
+    if (cw.contentPropsNode) {
+      if (cw.contentPropsNode.type === 'Literal' && cw.contentPropsNode.value === null) {
+        // Replace null with color props object
+        ms.overwrite(cw.contentPropsNode.start, cw.contentPropsNode.end, `{color:'${colors.contentColor}'}`);
+        patches.push(`Content color: ${colors.contentColor}`);
+      } else {
+        debug('Content props node is not null literal, skipping color patch');
+      }
+    } else {
+      debug('Content props node not found');
+    }
+
+    // Step 4b: Modify the component function signature to accept color prop
+    const funcInfo = findContentComponentFunction(ast, code, cw.contentComponent);
+    if (funcInfo && funcInfo.paramsNode) {
+      // Build new params: {children:VAR,color:$TC}
+      const newParams = `{children:${funcInfo.childrenVar},color:$TC}`;
+      ms.overwrite(funcInfo.paramsStart, funcInfo.paramsEnd, newParams);
+      patches.push('Content component: signature updated');
+
+      // Step 4c: Wrap push patterns with colored Text element
+      const pushResult = findPushPattern(ast, code, cw.contentComponent);
+      if (pushResult && pushResult.patterns.length > 0) {
+        for (const push of pushResult.patterns) {
+          // Original: ARR.push(REACT.default.createElement(TEXTEL,{key:ARR.length},STR.trim()))
+          // Patched:  ARR.push(REACT.default.createElement($,{key:ARR.length,color:$TC},REACT.default.createElement(TEXTEL,null,STR.trim())))
+          const wrapped = `${push.arrayVar}.push(${push.reactVar}.default.createElement($,{key:${push.arrayVar}.length,color:$TC},${push.reactVar}.default.createElement(${push.textElement},null,${push.stringVar}.trim())))`;
+          ms.overwrite(push.position, push.end, wrapped);
+        }
+        patches.push(`Content push patterns wrapped (${pushResult.patterns.length})`);
+      }
+    }
+  } else if (colors.contentColor && detections.contentWrapper.isPatched) {
+    patches.push('Content color (already patched)');
+  }
+
+  return {
+    code: ms.toString(),
+    patches
+  };
+}
+
+// ============================================
+// PHASE 4: VERIFICATION & MAIN
+// ============================================
+
+function verifyPatchedCode(patchedCode, colors, expectedPatches) {
+  // Re-parse to ensure valid JS
+  let ast;
+  try {
+    ast = parseWithAcorn(patchedCode);
+    if (!ast) {
+      return { valid: false, error: 'Failed to parse patched code' };
+    }
+  } catch (e) {
+    return { valid: false, error: e.message };
+  }
+
+  // Verify patches using AST-based detection
+  const checks = [];
+  const failures = [];
+
+  // Check 1: Collapsed guard is disabled
+  const collapsedResult = findCollapsedView(ast, patchedCode);
+  if (collapsedResult.success && collapsedResult.isPatched) {
+    checks.push('collapsed_guard');
+  } else if (expectedPatches?.collapsedView) {
+    failures.push('collapsed_guard: expected isPatched=true');
+  }
+
+  // Check 2: Switch case is forced
+  const switchResult = findSwitchCase(ast, patchedCode);
+  if (switchResult.success && switchResult.isPatched) {
+    checks.push('transcript_mode');
+  } else if (expectedPatches?.switchCase) {
+    failures.push('transcript_mode: expected isPatched=true');
+  }
+
+  // Check 3: Header color (if requested)
+  if (colors.headerColor) {
+    const headerResult = findExpandedHeader(ast, patchedCode);
+    if (headerResult.success && headerResult.isPatched) {
+      checks.push('header_color');
+    } else if (expectedPatches?.headerColor) {
+      failures.push('header_color: expected isPatched=true');
+    }
+  }
+
+  // Check 4: Content color (if requested)
+  if (colors.contentColor) {
+    const contentResult = findContentWrapper(ast, patchedCode);
+    if (contentResult.success && contentResult.isPatched) {
+      checks.push('content_color');
+    } else if (expectedPatches?.contentColor) {
+      failures.push('content_color: expected isPatched=true');
+    }
+  }
+
+  if (failures.length > 0) {
+    return { valid: false, error: `Patch verification failed: ${failures.join(', ')}`, checks };
+  }
+
+  return { valid: true, checks };
+}
+
+function main() {
+  console.log('🧠 Thinker (AST) - Claude Code Thinking Visibility Patch\n');
+  console.log('🔍 Finding Claude Code installation...');
+
+  const cliPath = findClaudeCode();
+  if (!cliPath) {
+    console.error('❌ Could not find Claude Code installation');
+    console.error('   Searched common locations. Is Claude Code installed?');
+    process.exit(EXIT.GENERAL_ERROR);
+  }
+
+  console.log(`📁 Found: ${cliPath}`);
+  const backupPath = cliPath + '.backup';
+
+  // Handle restore
+  if (RESTORE) {
+    if (DRY_RUN) {
+      console.log('🔄 [DRY RUN] Would restore from backup');
+    } else {
+      if (restoreFromBackup(cliPath, backupPath)) {
+        console.log('🔄 Restart Claude Code for changes to take effect.');
+      }
+    }
+    process.exit(EXIT.SUCCESS);
+  }
+
+  // Read file
+  const content = fs.readFileSync(cliPath, 'utf8');
+  const version = getVersion(content);
+  console.log(`📦 Version: ${version}\n`);
+
+  // Parse AST
+  console.log('🔬 Parsing with Acorn...');
+  const ast = parseWithAcorn(content);
+  if (!ast) {
+    process.exit(EXIT.GENERAL_ERROR);
+  }
+  console.log('   ✅ Parse successful\n');
+
+  // Detect patterns
+  console.log('🔍 Pattern Detection:');
+
+  const detections = {
+    expandedHeader: findExpandedHeader(ast, content),
+    collapsedView: findCollapsedView(ast, content),
+    switchCase: findSwitchCase(ast, content),
+    contentWrapper: findContentWrapper(ast, content)
+  };
+
+  // Report detection results
+  for (const [name, result] of Object.entries(detections)) {
+    if (result.success) {
+      const status = result.isPatched ? '(already patched)' : '';
+      console.log(`   ✅ ${name} ${status}`);
+    } else {
+      console.log(`   ⚠️  ${name}: ${result.error}`);
+    }
+  }
+
+  // Resolve colors
+  const colors = resolveColors();
+  if (colors.headerColor || colors.contentColor) {
+    console.log(`\n🎨 Colors:`);
+    if (colors.headerColor === colors.contentColor) {
+      console.log(`   Both: ${colors.headerColor}`);
+    } else {
+      if (colors.headerColor) console.log(`   Header: ${colors.headerColor}`);
+      if (colors.contentColor) console.log(`   Content: ${colors.contentColor}`);
+    }
+  }
+
+  // Check if anything is patchable
+  const hasPatchablePatterns =
+    (detections.expandedHeader.success && !detections.expandedHeader.isPatched) ||
+    (detections.collapsedView.success && !detections.collapsedView.isPatched) ||
+    (detections.switchCase.success && !detections.switchCase.isPatched) ||
+    (colors.contentColor && detections.contentWrapper.success && !detections.contentWrapper.isPatched);
+
+  const allPatched =
+    detections.expandedHeader.isPatched &&
+    detections.collapsedView.isPatched &&
+    detections.switchCase.isPatched;
+
+  if (CHECK_ONLY) {
+    if (hasPatchablePatterns) {
+      console.log('\n✅ Version is patchable!');
+      process.exit(EXIT.SUCCESS);
+    } else if (allPatched) {
+      console.log('\n⚠️  Already fully patched. Use --restore to reset.');
+      process.exit(EXIT.ALREADY_PATCHED);
+    } else {
+      console.log('\n❌ Version may not be patchable.');
+      process.exit(EXIT.GENERAL_ERROR);
+    }
+  }
+
+  if (!hasPatchablePatterns) {
+    if (allPatched) {
+      console.log('\n⚠️  File appears already patched. Use --restore to reset, then re-patch.');
+      process.exit(EXIT.ALREADY_PATCHED);
+    } else {
+      console.error('\n❌ No patchable patterns found.');
+      process.exit(EXIT.GENERAL_ERROR);
+    }
+  }
+
+  // Apply patches
+  console.log('\n📝 Applying patches...');
+  const { code: patchedCode, patches } = applyPatches(content, ast, detections, colors);
+
+  for (const patch of patches) {
+    console.log(`   ✅ ${patch}`);
+  }
+
+  // Verify
+  console.log('\n🔍 Verifying patched code...');
+  const verification = verifyPatchedCode(patchedCode, colors);
+  if (!verification.valid) {
+    console.error(`❌ Verification failed: ${verification.error}`);
+    process.exit(EXIT.VERIFICATION_FAILED);
+  }
+  console.log(`   ✅ Valid JS, patches confirmed: ${verification.checks.join(', ')}`);
+
+  // Write changes
+  if (DRY_RUN) {
+    console.log('\n🔍 Dry run complete. Run without --dry-run to apply patches.');
+    process.exit(EXIT.SUCCESS);
+  }
+
+  atomicWrite(cliPath, patchedCode, backupPath);
+  console.log('\n✅ Patches applied successfully!');
+  console.log('🔄 Restart Claude Code for changes to take effect.');
+  process.exit(EXIT.SUCCESS);
+}
+
+main();

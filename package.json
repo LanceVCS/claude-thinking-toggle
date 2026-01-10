@@ -1,0 +1,16 @@
+{
+  "name": "thinker-ast",
+  "version": "1.0.0",
+  "description": "AST-based Claude Code thinking visibility patch",
+  "main": "thinker-ast.js",
+  "scripts": {
+    "patch": "node thinker-ast.js",
+    "check": "node thinker-ast.js --check",
+    "restore": "node thinker-ast.js --restore"
+  },
+  "dependencies": {
+    "acorn": "^8.14.0",
+    "acorn-walk": "^8.3.4",
+    "magic-string": "^0.30.17"
+  }
+}
