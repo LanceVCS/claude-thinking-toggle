@@ -334,11 +334,12 @@ function getVersion(content) {
 
 // Extract the NbA thinking component that shows collapsed/expanded view (v2.1.x)
 function extractThinkingComponent(content) {
-  // Match the NbA component that contains the collapsed "∴ Thinking (ctrl+o to expand)" text
+  // Match the NbA component that contains the collapsed "∴ Thinking (...)" text
+  // v2.1.3+: keyboard shortcut is now a variable: "∴ Thinking (",Y," to expand)"
   // Unpatched: if(!(B||G))return $6A.default.createElement(...)
   // Patched: if(!1)return $6A.default.createElement(...)
-  const collapsedRegex = /if\(!\(([A-Z])\|\|([A-Z])\)\)return ([\$A-Za-z0-9]+)\.default\.createElement\(([A-Z]),\{marginTop:[A-Z]\?1:0\},\3\.default\.createElement\(([A-Z]),\{dimColor:!0,italic:!0\},"∴ Thinking \(ctrl\+o to expand\)"\)\);/;
-  const patchedRegex = /if\(!1\)return ([\$A-Za-z0-9]+)\.default\.createElement\(([A-Z]),\{marginTop:[A-Z]\?1:0\},\1\.default\.createElement\(([A-Z]),\{dimColor:!0,italic:!0\},"∴ Thinking \(ctrl\+o to expand\)"\)\);/;
+  const collapsedRegex = /if\(!\(([A-Z])\|\|([A-Z])\)\)return ([\$A-Za-z0-9]+)\.default\.createElement\(([A-Z]),\{marginTop:[A-Z]\?1:0\},\3\.default\.createElement\(([\$A-Z]),\{dimColor:!0,italic:!0\},"∴ Thinking \(",[A-Z]," to expand\)"\)\);/;
+  const patchedRegex = /if\(!1\)return ([\$A-Za-z0-9]+)\.default\.createElement\(([A-Z]),\{marginTop:[A-Z]\?1:0\},\1\.default\.createElement\(([\$A-Z]),\{dimColor:!0,italic:!0\},"∴ Thinking \(",[A-Z]," to expand\)"\)\);/;
 
   let match = content.match(collapsedRegex);
   if (match) {
@@ -412,7 +413,7 @@ function extractBannerFunction(content) {
 // Detect the thinking case pattern (v2.1.x with hideInTranscript)
 function detectThinkingPatternV2(content) {
   // Pattern: case"thinking":{if(!D&&!Z)return null;return XXX.createElement(YYY,{addMargin:Q,param:A,isTranscriptMode:D,verbose:Z,hideInTranscript:...}
-  const regex = /case"thinking":\{if\(!([A-Z])&&!([A-Z])\)return null;return ([a-z0-9]+)\.createElement\(([A-Za-z0-9]+),\{addMargin:([A-Z]),param:([A-Z]),isTranscriptMode:([A-Z]),verbose:([A-Z]),hideInTranscript:[^}]+\}/;
+  const regex = /case"thinking":\{if\(!([A-Z])&&!([A-Z])\)return null;return ([A-Za-z0-9$]+)\.createElement\(([A-Za-z0-9]+),\{addMargin:([A-Z]),param:([A-Z]),isTranscriptMode:([A-Z]),verbose:([A-Z]),hideInTranscript:[^}]+\}/;
   const match = content.match(regex);
 
   if (!match) return null;
@@ -805,7 +806,7 @@ function main() {
           // Build replacement with color wrapper, preserving the actual element names
           // We wrap with a Text element that has color, using $ as Text (standard Ink)
           // But we need to find the actual Text import name - use the same reactVar
-          const replacement = `${arrayVar}.push(${reactVar}.default.createElement($,{key:${arrayVar}.length,color:$TC},${reactVar}.default.createElement(${textElement},null,${stringVar}.trim())))`;
+          const replacement = `${arrayVar}.push(${reactVar}.default.createElement($,{key:${arrayVar}.length,color:$TC},${reactVar}.default.createElement(${textElement},null,(${stringVar}||'').trim())))`;
 
           if (patched.includes(exactPushPattern)) {
             if (!DRY_RUN) {
@@ -825,7 +826,7 @@ function main() {
           if (genericPushRegex.test(patched)) {
             if (!DRY_RUN) {
               patched = patched.replace(genericPushRegex, (match, arrVar, rVar, textEl, strVar) => {
-                return `${arrVar}.push(${rVar}.default.createElement($,{key:${arrVar}.length,color:$TC},${rVar}.default.createElement(${textEl},null,${strVar}.trim())))`;
+                return `${arrVar}.push(${rVar}.default.createElement($,{key:${arrVar}.length,color:$TC},${rVar}.default.createElement(${textEl},null,(${strVar}||'').trim())))`;
               });
             }
             flushPatched = true;
