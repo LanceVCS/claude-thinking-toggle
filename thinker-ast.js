@@ -833,7 +833,11 @@ function findContentWrapper(ast, code) {
     return { error: 'PATTERN_MISMATCH' };
   }
 
-  // Use the first (closest) candidate
+  if (candidateWrappers.length > 1) {
+    debug(`Ambiguous: found ${candidateWrappers.length} content wrappers near header`);
+    return { error: 'AMBIGUOUS', count: candidateWrappers.length };
+  }
+
   const match = candidateWrappers[0];
 
   return {
@@ -951,6 +955,9 @@ function findPushPattern(ast, code, componentName) {
         stringVar = childArg.callee.object.name;
       }
 
+      // Skip patterns where extraction failed - prevents null interpolation in generated code
+      if (!reactVar || !textElement || !stringVar) return;
+
       pushPatterns.push({
         callNode: node,
         createElementNode: createCall,
@@ -970,7 +977,12 @@ function findPushPattern(ast, code, componentName) {
     return null;
   }
 
-  debug(`Found ${pushPatterns.length} push patterns in ${componentName}`);
+  if (pushPatterns.length > 1) {
+    debug(`Ambiguous: found ${pushPatterns.length} push patterns in ${componentName}`);
+    return { error: 'AMBIGUOUS', count: pushPatterns.length, componentName };
+  }
+
+  debug(`Found ${pushPatterns.length} push pattern(s) in ${componentName}`);
   return { patterns: pushPatterns, funcInfo };
 }
 
@@ -1053,38 +1065,57 @@ function applyPatches(code, ast, detections, colors) {
   if (colors.contentColor && detections.contentWrapper.success && !detections.contentWrapper.isPatched) {
     const cw = detections.contentWrapper;
 
-    // Step 4a: Modify the content component's props using AST positions
-    // Change from null to {color:'...'}
-    if (cw.contentPropsNode) {
-      if (cw.contentPropsNode.type === 'Literal' && cw.contentPropsNode.value === null) {
-        // Replace null with color props object
-        ms.overwrite(cw.contentPropsNode.start, cw.contentPropsNode.end, `{color:'${colors.contentColor}'}`);
-        patches.push(`Content color: ${colors.contentColor}`);
-      } else {
-        debug('Content props node is not null literal, skipping color patch');
-      }
+    // Guard: skip if component name extraction failed
+    if (!cw.contentComponent) {
+      debug('Content component name not found, skipping color injection');
     } else {
-      debug('Content props node not found');
-    }
-
-    // Step 4b: Modify the component function signature to accept color prop
-    const funcInfo = findContentComponentFunction(ast, code, cw.contentComponent);
-    if (funcInfo && funcInfo.paramsNode) {
-      // Build new params: {children:VAR,color:$TC}
-      const newParams = `{children:${funcInfo.childrenVar},color:$TC}`;
-      ms.overwrite(funcInfo.paramsStart, funcInfo.paramsEnd, newParams);
-      patches.push('Content component: signature updated');
-
-      // Step 4c: Wrap push patterns with colored Text element
-      const pushResult = findPushPattern(ast, code, cw.contentComponent);
-      if (pushResult && pushResult.patterns.length > 0) {
-        for (const push of pushResult.patterns) {
-          // Original: ARR.push(REACT.default.createElement(TEXTEL,{key:ARR.length},STR.trim()))
-          // Patched:  ARR.push(REACT.default.createElement($,{key:ARR.length,color:$TC},REACT.default.createElement(TEXTEL,null,STR.trim())))
-          const wrapped = `${push.arrayVar}.push(${push.reactVar}.default.createElement($,{key:${push.arrayVar}.length,color:$TC},${push.reactVar}.default.createElement(${push.textElement},null,${push.stringVar}.trim())))`;
-          ms.overwrite(push.position, push.end, wrapped);
+      // Step 4a: Modify the content component's props using AST positions
+      // Change from null to {color:'...'}
+      if (cw.contentPropsNode) {
+        if (cw.contentPropsNode.type === 'Literal' && cw.contentPropsNode.value === null) {
+          // Replace null with color props object
+          ms.overwrite(cw.contentPropsNode.start, cw.contentPropsNode.end, `{color:'${colors.contentColor}'}`);
+          patches.push(`Content color: ${colors.contentColor}`);
+        } else {
+          debug('Content props node is not null literal, skipping color patch');
         }
-        patches.push(`Content push patterns wrapped (${pushResult.patterns.length})`);
+      } else {
+        debug('Content props node not found');
+      }
+
+      // Step 4b: Modify the component function signature to accept color prop
+      const funcInfo = findContentComponentFunction(ast, code, cw.contentComponent);
+      if (funcInfo && funcInfo.paramsNode) {
+        // Guard: skip if children parameter extraction failed
+        if (!funcInfo.childrenVar) {
+          debug(`Could not extract children parameter from ${cw.contentComponent}, skipping signature patch`);
+        } else {
+          // Build new params: {children:VAR,color:$TC}
+          const newParams = `{children:${funcInfo.childrenVar},color:$TC}`;
+          ms.overwrite(funcInfo.paramsStart, funcInfo.paramsEnd, newParams);
+          patches.push('Content component: signature updated');
+
+          // Step 4c: Wrap push patterns with colored Text element
+          const pushResult = findPushPattern(ast, code, cw.contentComponent);
+          if (pushResult?.error === 'AMBIGUOUS') {
+            console.error(`\n❌ Ambiguous: found ${pushResult.count} push patterns in ${pushResult.componentName}. Script needs fixing.`);
+            process.exit(EXIT.AMBIGUOUS);
+          }
+          if (pushResult && pushResult.patterns.length > 0) {
+            for (const push of pushResult.patterns) {
+              // Guard: skip patterns with missing required variables (belt-and-suspenders with findPushPattern guard)
+              if (!push.reactVar || !push.textElement || !push.stringVar) {
+                debug('Skipping push pattern with null variables');
+                continue;
+              }
+              // Original: ARR.push(REACT.default.createElement(TEXTEL,{key:ARR.length},STR.trim()))
+              // Patched:  ARR.push(REACT.default.createElement($,{key:ARR.length,color:$TC},REACT.default.createElement(TEXTEL,null,(STR||'').trim())))
+              const wrapped = `${push.arrayVar}.push(${push.reactVar}.default.createElement($,{key:${push.arrayVar}.length,color:$TC},${push.reactVar}.default.createElement(${push.textElement},null,(${push.stringVar}||'').trim())))`;
+              ms.overwrite(push.position, push.end, wrapped);
+            }
+            patches.push(`Content push patterns wrapped (${pushResult.patterns.length})`);
+          }
+        }
       }
     }
   } else if (colors.contentColor && detections.contentWrapper.isPatched) {
