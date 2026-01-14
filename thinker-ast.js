@@ -1061,14 +1061,21 @@ function applyPatches(code, ast, detections, colors) {
     patches.push('Header color (already patched)');
   }
 
-  // Patch 4: Content color (optional) - CONSISTENT STRUCTURE APPROACH
-  // Always wrap text chunks in Text element (consistent structure helps React reconciliation)
-  // Only add color prop when $TC is defined
+  // Patch 4: Content color (optional)
+  // The push pattern uses M8 (ANSI parser) which ignores color prop.
+  // We need to wrap M8 in C (Text component) which supports color.
+  // Get C from the header detection (detections.expandedHeader.textElement).
   if (colors.contentColor && detections.contentWrapper.success && !detections.contentWrapper.isPatched) {
     const cw = detections.contentWrapper;
+    const eh = detections.expandedHeader;
+
+    // Get the Text component (C) from the header - it's the only reliable source
+    const textComponent = eh.success ? eh.textElement : null;
 
     if (!cw.contentComponent) {
       debug('Content component name not found, skipping color injection');
+    } else if (!textComponent) {
+      debug('Text component not found from header, skipping color injection');
     } else {
       // Step 4a: Pass color prop to content component
       if (cw.contentPropsNode?.type === 'Literal' && cw.contentPropsNode.value === null) {
@@ -1083,7 +1090,8 @@ function applyPatches(code, ast, detections, colors) {
         ms.overwrite(funcInfo.paramsStart, funcInfo.paramsEnd, newParams);
         patches.push('Content component: signature updated');
 
-        // Step 4c: Wrap push patterns - ALWAYS wrap in $ for consistent structure
+        // Step 4c: Wrap M8 (ANSI parser) in C (Text component) with color
+        // Pattern: createElement(C, {key, color}, createElement(M8, null, content))
         const pushResult = findPushPattern(ast, code, cw.contentComponent);
         if (pushResult?.error === 'AMBIGUOUS') {
           console.error(`\n❌ Ambiguous: found ${pushResult.count} push patterns in ${pushResult.componentName}.`);
@@ -1093,12 +1101,13 @@ function applyPatches(code, ast, detections, colors) {
           for (const push of pushResult.patterns) {
             if (!push.reactVar || !push.textElement || !push.stringVar) continue;
 
-            // ALWAYS wrap in $ (consistent structure), conditionally add color prop
-            // This helps React reconciliation by keeping the same component tree shape
-            const wrapped = `${push.arrayVar}.push(${push.reactVar}.default.createElement($,$TC?{key:${push.arrayVar}.length,color:$TC}:{key:${push.arrayVar}.length},${push.reactVar}.default.createElement(${push.textElement},null,(${push.stringVar}||'').trim())))`;
+            // Wrap M8 in Text component (C) with color prop
+            // push.textElement = M8 (ANSI parser, ignores color)
+            // textComponent = C (Text component, supports color)
+            const wrapped = `${push.arrayVar}.push(${push.reactVar}.default.createElement(${textComponent},{key:${push.arrayVar}.length,color:$TC},${push.reactVar}.default.createElement(${push.textElement},null,(${push.stringVar}||'').trim())))`;
             ms.overwrite(push.position, push.end, wrapped);
           }
-          patches.push(`Content push patterns wrapped (${pushResult.patterns.length})`);
+          patches.push(`Content push patterns wrapped with ${textComponent} (${pushResult.patterns.length})`);
         }
       }
     }
