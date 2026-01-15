@@ -986,6 +986,143 @@ function findPushPattern(ast, code, componentName) {
   return { patterns: pushPatterns, funcInfo };
 }
 
+/**
+ * Check if a CallExpression is a React.memo() call
+ * Handles: REACT.default.memo(...) or REACT.memo(...)
+ */
+function isMemoCall(node) {
+  if (node.type !== 'CallExpression') return false;
+  const callee = node.callee;
+
+  if (callee.type !== 'MemberExpression') return false;
+
+  // Check for .memo property
+  if (callee.property?.type === 'Identifier' && callee.property.name === 'memo') {
+    return true;
+  }
+
+  return false;
+}
+
+/**
+ * Find the M8 ANSI parser component definition
+ * M8 is a memo'd component with {children:X} param and multiple createElement(DF, null, ...) calls
+ * Returns: { funcNode, childrenVar, rootElement, paramsStart, paramsEnd, dfCreateCalls[], reactVar }
+ */
+function findM8Component(ast, code) {
+  const memoedComponents = [];
+
+  walk.simple(ast, {
+    CallExpression(node) {
+      // Look for REACT.default.memo(...) or REACT.memo(...) pattern
+      if (!isMemoCall(node)) return;
+
+      // The argument should be a function with {children:X} destructuring
+      const funcArg = node.arguments[0];
+      if (!funcArg || funcArg.type !== 'FunctionExpression') return;
+
+      const param = funcArg.params[0];
+      if (!param || param.type !== 'ObjectPattern') return;
+
+      // Check for children property in destructuring
+      const childrenProp = param.properties.find(p =>
+        (p.key?.type === 'Identifier' && p.key.name === 'children') ||
+        (p.key?.type === 'Literal' && p.key.value === 'children')
+      );
+      if (!childrenProp) return;
+
+      const childrenVar = childrenProp.value?.type === 'Identifier' ? childrenProp.value.name : null;
+      if (!childrenVar) return;
+
+      // Search function body for createElement calls with null props (DF root element)
+      const dfCreateCalls = [];
+      let rootElement = null;
+
+      walk.simple(funcArg.body, {
+        CallExpression(innerNode) {
+          if (!isCreateElementCall(innerNode)) return;
+
+          const typeArg = innerNode.arguments[0];
+          const propsArg = innerNode.arguments[1];
+
+          // Track calls where props is 'null' literal (these need patching)
+          if (propsArg?.type === 'Literal' && propsArg.value === null) {
+            // Capture root element name from first call
+            if (!rootElement && typeArg?.type === 'Identifier') {
+              rootElement = typeArg.name;
+            }
+
+            // Only track calls to the same root element
+            if (typeArg?.type === 'Identifier' && typeArg.name === rootElement) {
+              dfCreateCalls.push({
+                node: innerNode,
+                typeArg,
+                propsArg,
+                start: innerNode.start,
+                end: innerNode.end,
+                propsStart: propsArg.start,
+                propsEnd: propsArg.end
+              });
+            }
+          }
+        }
+      });
+
+      // M8 has exactly 3 DF createElement calls with null props
+      if (dfCreateCalls.length >= 3) {
+        memoedComponents.push({
+          memoNode: node,
+          funcNode: funcArg,
+          childrenVar,
+          rootElement,
+          dfCreateCalls,
+          paramsNode: param,
+          paramsStart: param.start,
+          paramsEnd: param.end,
+          reactVar: getReactVarFromCall(node)
+        });
+      }
+    }
+  });
+
+  // Disambiguate by checking for ANSI-related content patterns
+  const validMatches = memoedComponents.filter(m => {
+    const funcCode = code.substring(m.funcNode.start, m.funcNode.end);
+    // M8 contains specific patterns: length checks, Object.keys, type checks
+    return funcCode.includes('.length===1') &&
+           funcCode.includes('Object.keys') &&
+           funcCode.includes('typeof');
+  });
+
+  if (validMatches.length === 0) {
+    debug('No M8 component found');
+    return { error: 'NOT_FOUND' };
+  }
+
+  if (validMatches.length > 1) {
+    debug(`Ambiguous: found ${validMatches.length} potential M8 components`);
+    return { error: 'AMBIGUOUS', count: validMatches.length };
+  }
+
+  const match = validMatches[0];
+
+  // Check if already patched (signature has color param)
+  const paramsCode = code.substring(match.paramsStart, match.paramsEnd);
+  const isPatched = paramsCode.includes('color');
+
+  return {
+    success: true,
+    funcNode: match.funcNode,
+    childrenVar: match.childrenVar,
+    rootElement: match.rootElement,
+    reactVar: match.reactVar,
+    paramsStart: match.paramsStart,
+    paramsEnd: match.paramsEnd,
+    dfCreateCalls: match.dfCreateCalls,
+    isPatched
+  };
+}
+
 // ============================================
 // PHASE 3: PATCHING ENGINE
 // ============================================
@@ -1061,37 +1198,41 @@ function applyPatches(code, ast, detections, colors) {
     patches.push('Header color (already patched)');
   }
 
-  // Patch 4: Content color (optional)
-  // The push pattern uses M8 (ANSI parser) which ignores color prop.
-  // We need to wrap M8 in C (Text component) which supports color.
-  // Get C from the header detection (detections.expandedHeader.textElement).
-  if (colors.contentColor && detections.contentWrapper.success && !detections.contentWrapper.isPatched) {
+  // Patch 4: Content color via Fix A - patch M8 directly (no wrapping)
+  // Instead of wrapping M8 in Text component, we patch M8 to accept and forward color props
+  // This avoids nested Text components that cause Ink rendering artifacts
+  if (colors.contentColor && detections.m8Component.success && !detections.m8Component.isPatched) {
+    const m8 = detections.m8Component;
     const cw = detections.contentWrapper;
-    const eh = detections.expandedHeader;
 
-    // Get the Text component (C) from the header - it's the only reliable source
-    const textComponent = eh.success ? eh.textElement : null;
+    // Step 4a: Patch M8's signature to accept color prop
+    // Change: {children:Q} -> {children:Q,color:$MC}
+    const newM8Params = `{children:${m8.childrenVar},color:$MC}`;
+    ms.overwrite(m8.paramsStart, m8.paramsEnd, newM8Params);
+    patches.push('M8 component: signature updated');
 
-    if (!cw.contentComponent) {
-      debug('Content component name not found, skipping color injection');
-    } else if (!textComponent) {
-      debug('Text component not found from header, skipping color injection');
-    } else {
-      // Step 4a: Pass color prop to content component
+    // Step 4b: Forward color to all DF createElement calls in M8
+    // Change: createElement(DF, null, ...) -> createElement(DF, {color:$MC}, ...)
+    for (const call of m8.dfCreateCalls) {
+      ms.overwrite(call.propsStart, call.propsEnd, '{color:$MC}');
+    }
+    patches.push(`M8 component: ${m8.dfCreateCalls.length} createElement calls patched`);
+
+    // Step 4c: Update content component to pass color to M8
+    if (cw?.success && cw.contentComponent) {
+      // Pass color prop to content component
       if (cw.contentPropsNode?.type === 'Literal' && cw.contentPropsNode.value === null) {
         ms.overwrite(cw.contentPropsNode.start, cw.contentPropsNode.end, `{color:'${colors.contentColor}'}`);
-        patches.push(`Content color: ${colors.contentColor}`);
       }
 
-      // Step 4b: Modify component signature and wrap push patterns
+      // Modify content component signature to accept and forward color
       const funcInfo = findContentComponentFunction(ast, code, cw.contentComponent);
       if (funcInfo?.paramsNode && funcInfo.childrenVar) {
         const newParams = `{children:${funcInfo.childrenVar},color:$TC}`;
         ms.overwrite(funcInfo.paramsStart, funcInfo.paramsEnd, newParams);
         patches.push('Content component: signature updated');
 
-        // Step 4c: Wrap M8 (ANSI parser) in C (Text component) with color
-        // Pattern: createElement(C, {key, color}, createElement(M8, null, content))
+        // Step 4d: Update push pattern to pass color directly to M8 (no wrapping)
         const pushResult = findPushPattern(ast, code, cw.contentComponent);
         if (pushResult?.error === 'AMBIGUOUS') {
           console.error(`\n❌ Ambiguous: found ${pushResult.count} push patterns in ${pushResult.componentName}.`);
@@ -1101,17 +1242,18 @@ function applyPatches(code, ast, detections, colors) {
           for (const push of pushResult.patterns) {
             if (!push.reactVar || !push.textElement || !push.stringVar) continue;
 
-            // Wrap M8 in Text component (C) with color prop
-            // push.textElement = M8 (ANSI parser, ignores color)
-            // textComponent = C (Text component, supports color)
-            const wrapped = `${push.arrayVar}.push(${push.reactVar}.default.createElement(${textComponent},{key:${push.arrayVar}.length,color:$TC},${push.reactVar}.default.createElement(${push.textElement},null,(${push.stringVar}||'').trim())))`;
-            ms.overwrite(push.position, push.end, wrapped);
+            // Fix A: Pass color directly to M8 (no wrapping in Text component)
+            // M8 now accepts color prop and forwards it to its root element
+            const direct = `${push.arrayVar}.push(${push.reactVar}.default.createElement(${push.textElement},{key:${push.arrayVar}.length,color:$TC},(${push.stringVar}||'').trim()))`;
+            ms.overwrite(push.position, push.end, direct);
           }
-          patches.push(`Content push patterns wrapped with ${textComponent} (${pushResult.patterns.length})`);
+          patches.push(`Push patterns: direct M8 invocation (${pushResult.patterns.length})`);
         }
       }
     }
-  } else if (colors.contentColor && detections.contentWrapper.isPatched) {
+
+    patches.push(`Content color: ${colors.contentColor}`);
+  } else if (colors.contentColor && detections.m8Component.isPatched) {
     patches.push('Content color (already patched)');
   }
 
@@ -1167,13 +1309,19 @@ function verifyPatchedCode(patchedCode, colors, expectedPatches) {
     }
   }
 
-  // Check 4: Content color (if requested)
+  // Check 4: Content color via M8 (if requested)
   if (colors.contentColor) {
+    const m8Result = findM8Component(ast, patchedCode);
+    if (m8Result.success && m8Result.isPatched) {
+      checks.push('m8_color');
+    } else if (expectedPatches?.contentColor) {
+      failures.push('m8_color: expected M8 signature to have color param');
+    }
+
+    // Also check content wrapper is updated
     const contentResult = findContentWrapper(ast, patchedCode);
     if (contentResult.success && contentResult.isPatched) {
       checks.push('content_color');
-    } else if (expectedPatches?.contentColor) {
-      failures.push('content_color: expected isPatched=true');
     }
   }
 
@@ -1230,7 +1378,8 @@ function main() {
     expandedHeader: findExpandedHeader(ast, content),
     collapsedView: findCollapsedView(ast, content),
     switchCase: findSwitchCase(ast, content),
-    contentWrapper: findContentWrapper(ast, content)
+    contentWrapper: findContentWrapper(ast, content),
+    m8Component: findM8Component(ast, content)
   };
 
   // Report detection results
@@ -1260,7 +1409,7 @@ function main() {
     (detections.expandedHeader.success && !detections.expandedHeader.isPatched) ||
     (detections.collapsedView.success && !detections.collapsedView.isPatched) ||
     (detections.switchCase.success && !detections.switchCase.isPatched) ||
-    (colors.contentColor && detections.contentWrapper.success && !detections.contentWrapper.isPatched);
+    (colors.contentColor && detections.m8Component.success && !detections.m8Component.isPatched);
 
   const allPatched =
     detections.expandedHeader.isPatched &&
