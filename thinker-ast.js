@@ -1198,9 +1198,9 @@ function applyPatches(code, ast, detections, colors) {
     patches.push('Header color (already patched)');
   }
 
-  // Patch 4: Content color via Fix A - patch M8 directly (no wrapping)
-  // Instead of wrapping M8 in Text component, we patch M8 to accept and forward color props
-  // This avoids nested Text components that cause Ink rendering artifacts
+  // Patch 4: Content color via Fix A Improved - thread color to Text components
+  // Box doesn't propagate 'color' to children - must reach actual <Text> elements
+  // Thread: ContentWrapper → ContentComponent → M8 → DF (Text elements)
   if (colors.contentColor && detections.m8Component.success && !detections.m8Component.isPatched) {
     const m8 = detections.m8Component;
     const cw = detections.contentWrapper;
@@ -1220,9 +1220,9 @@ function applyPatches(code, ast, detections, colors) {
 
     // Step 4c: Update content component to pass color to M8
     if (cw?.success && cw.contentComponent) {
-      // Pass color prop to content component
+      // Pass color prop to content component invocation
       if (cw.contentPropsNode?.type === 'Literal' && cw.contentPropsNode.value === null) {
-        ms.overwrite(cw.contentPropsNode.start, cw.contentPropsNode.end, `{color:'${colors.contentColor}'}`);
+        ms.overwrite(cw.contentPropsNode.start, cw.contentPropsNode.end, `{color:"${colors.contentColor}"}`);
       }
 
       // Modify content component signature to accept and forward color
@@ -1232,7 +1232,7 @@ function applyPatches(code, ast, detections, colors) {
         ms.overwrite(funcInfo.paramsStart, funcInfo.paramsEnd, newParams);
         patches.push('Content component: signature updated');
 
-        // Step 4d: Update push pattern to pass color directly to M8 (no wrapping)
+        // Step 4d: Update push pattern to pass color to M8
         const pushResult = findPushPattern(ast, code, cw.contentComponent);
         if (pushResult?.error === 'AMBIGUOUS') {
           console.error(`\n❌ Ambiguous: found ${pushResult.count} push patterns in ${pushResult.componentName}.`);
@@ -1242,12 +1242,17 @@ function applyPatches(code, ast, detections, colors) {
           for (const push of pushResult.patterns) {
             if (!push.reactVar || !push.textElement || !push.stringVar) continue;
 
-            // Fix A: Pass color directly to M8 (no wrapping in Text component)
-            // M8 now accepts color prop and forwards it to its root element
-            const direct = `${push.arrayVar}.push(${push.reactVar}.default.createElement(${push.textElement},{key:${push.arrayVar}.length,color:$TC},(${push.stringVar}||'').trim()))`;
-            ms.overwrite(push.position, push.end, direct);
+            // Pass color prop to M8 (the text element)
+            // Original: X.push(React.createElement(M8, {key:X.length}, str.trim()))
+            // Patched:  X.push(React.createElement(M8, {key:X.length,color:$TC}, str.trim()))
+            const keyProp = findObjectProperty(push.propsNode, 'key');
+            if (keyProp) {
+              // Insert color prop after existing props
+              const insertPos = push.propsNode.end - 1;
+              ms.appendLeft(insertPos, ',color:$TC');
+            }
           }
-          patches.push(`Push patterns: direct M8 invocation (${pushResult.patterns.length})`);
+          patches.push(`Push patterns: color prop added (${pushResult.patterns.length})`);
         }
       }
     }
@@ -1255,6 +1260,8 @@ function applyPatches(code, ast, detections, colors) {
     patches.push(`Content color: ${colors.contentColor}`);
   } else if (colors.contentColor && detections.m8Component.isPatched) {
     patches.push('Content color (already patched)');
+  } else if (colors.contentColor && !detections.m8Component.success) {
+    console.warn(`⚠️  Content color requested but M8 component not found: ${detections.m8Component.error}`);
   }
 
   return {
@@ -1310,6 +1317,7 @@ function verifyPatchedCode(patchedCode, colors, expectedPatches) {
   }
 
   // Check 4: Content color via M8 (if requested)
+  // Fix A Improved: Color is threaded through M8 component
   if (colors.contentColor) {
     const m8Result = findM8Component(ast, patchedCode);
     if (m8Result.success && m8Result.isPatched) {
@@ -1318,10 +1326,17 @@ function verifyPatchedCode(patchedCode, colors, expectedPatches) {
       failures.push('m8_color: expected M8 signature to have color param');
     }
 
-    // Also check content wrapper is updated
+    // Also verify content wrapper passes color
     const contentResult = findContentWrapper(ast, patchedCode);
-    if (contentResult.success && contentResult.isPatched) {
-      checks.push('content_color');
+    if (contentResult.success && contentResult.contentPropsNode) {
+      // Check if content component is called with color prop
+      const propsNode = contentResult.contentPropsNode;
+      if (propsNode?.type === 'ObjectExpression') {
+        const colorProp = findObjectProperty(propsNode, 'color');
+        if (colorProp) {
+          checks.push('content_color');
+        }
+      }
     }
   }
 
