@@ -1,0 +1,218 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Thinker Theme Preview</title>
+  <style>
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+    }
+
+    body {
+      font-family: 'SF Mono', 'Monaco', 'Inconsolata', 'Fira Code', monospace;
+      background: #1a1a2e;
+      color: #eee;
+      padding: 40px;
+      min-height: 100vh;
+    }
+
+    h1 {
+      text-align: center;
+      margin-bottom: 10px;
+      font-size: 2.5rem;
+      background: linear-gradient(135deg, #ff8c00, #32cd32);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+      background-clip: text;
+    }
+
+    .subtitle {
+      text-align: center;
+      color: #888;
+      margin-bottom: 50px;
+      font-size: 0.9rem;
+    }
+
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
+      gap: 20px;
+      max-width: 1200px;
+      margin: 0 auto;
+    }
+
+    .card {
+      background: #16213e;
+      border-radius: 12px;
+      padding: 20px;
+      transition: transform 0.2s, box-shadow 0.2s;
+      cursor: pointer;
+    }
+
+    .card:hover {
+      transform: translateY(-4px);
+      box-shadow: 0 10px 30px rgba(0,0,0,0.3);
+    }
+
+    .card-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 15px;
+    }
+
+    .theme-name {
+      font-size: 1.1rem;
+      font-weight: 600;
+    }
+
+    .copy-btn {
+      background: #333;
+      border: none;
+      color: #888;
+      padding: 4px 10px;
+      border-radius: 4px;
+      font-size: 0.75rem;
+      cursor: pointer;
+      transition: all 0.2s;
+    }
+
+    .copy-btn:hover {
+      background: #444;
+      color: #fff;
+    }
+
+    .copy-btn.copied {
+      background: #32cd32;
+      color: #000;
+    }
+
+    .colors {
+      display: flex;
+      gap: 15px;
+      margin-bottom: 15px;
+    }
+
+    .color-item {
+      flex: 1;
+    }
+
+    .color-label {
+      font-size: 0.7rem;
+      color: #666;
+      text-transform: uppercase;
+      margin-bottom: 6px;
+    }
+
+    .color-swatch {
+      height: 40px;
+      border-radius: 6px;
+      margin-bottom: 6px;
+    }
+
+    .color-hex {
+      font-size: 0.8rem;
+      color: #888;
+    }
+
+    .preview {
+      background: #0f0f1a;
+      border-radius: 8px;
+      padding: 12px;
+      margin-top: 10px;
+    }
+
+    .preview-header {
+      font-style: italic;
+      margin-bottom: 8px;
+    }
+
+    .preview-content {
+      font-size: 0.85rem;
+      line-height: 1.5;
+    }
+
+    footer {
+      text-align: center;
+      margin-top: 60px;
+      color: #555;
+      font-size: 0.8rem;
+    }
+
+    footer code {
+      background: #333;
+      padding: 2px 8px;
+      border-radius: 4px;
+      color: #aaa;
+    }
+  </style>
+</head>
+<body>
+  <h1>Thinker Themes</h1>
+  <p class="subtitle">Available presets for Claude Code thinking blocks</p>
+
+  <div id="themes" class="grid"></div>
+
+  <footer>
+    <p>Apply with: <code>node thinker-ast.js --theme=&lt;name&gt;</code></p>
+  </footer>
+
+  <script>
+    const themes = [
+      { name: 'watermelon', header: '#32cd32', content: '#FF77FF' },
+      { name: 'emerald-saffron', header: '#00C853', content: '#F4C24D' },
+      { name: 'bubblegum', header: '#87ceeb', content: '#FF77FF' },
+      { name: 'carrot', header: '#ff8c00', content: '#32cd32' },
+      { name: 'autumn', header: '#FFBF00', content: '#D2691E' },
+      { name: 'ocean', header: '#98D8C8', content: '#20B2AA' },
+      { name: 'forest', header: '#90EE90', content: '#228B22' },
+      { name: 'cherry-blossom', header: '#FF69B4', content: '#FFB6C1' },
+      { name: 'cyberpunk', header: '#FCE300', content: '#00F0FF' },
+    ];
+
+    function createCard(theme) {
+      return `
+        <div class="card" onclick="copyTheme('${theme.name}', this)">
+          <div class="card-header">
+            <span class="theme-name">${theme.name}</span>
+            <button class="copy-btn">copy</button>
+          </div>
+          <div class="colors">
+            <div class="color-item">
+              <div class="color-label">Header</div>
+              <div class="color-swatch" style="background: ${theme.header}"></div>
+              <div class="color-hex">${theme.header}</div>
+            </div>
+            <div class="color-item">
+              <div class="color-label">Content</div>
+              <div class="color-swatch" style="background: ${theme.content}"></div>
+              <div class="color-hex">${theme.content}</div>
+            </div>
+          </div>
+          <div class="preview">
+            <div class="preview-header" style="color: ${theme.header}">∴ Thinking…</div>
+            <div class="preview-content" style="color: ${theme.content}">The user is asking about color themes. Let me analyze the request...</div>
+          </div>
+        </div>
+      `;
+    }
+
+    function copyTheme(name, card) {
+      const cmd = `--theme=${name}`;
+      navigator.clipboard.writeText(cmd);
+      const btn = card.querySelector('.copy-btn');
+      btn.textContent = 'copied!';
+      btn.classList.add('copied');
+      setTimeout(() => {
+        btn.textContent = 'copy';
+        btn.classList.remove('copied');
+      }, 1500);
+    }
+
+    document.getElementById('themes').innerHTML = themes.map(createCard).join('');
+  </script>
+</body>
+</html>
