@@ -212,25 +212,36 @@ function detectThinkingContentAnchored(content) {
 /**
  * Detect the content component function signature using the component name
  * @param {string} content - CLI.js file content
- * @param {string} componentName - Name of the content component (e.g., 'gK')
+ * @param {string} componentName - Name of the content component (e.g., 'oO')
  * @returns {object|null} Function info with extracted variable names
  */
 function detectContentComponentFunction(content, componentName) {
-  // Find: function COMP({children:VAR})
-  const signatureRegex = new RegExp(
+  // v2.1.17+: function COMP(A){...{children:VAR}=A...}
+  const signatureRegexNew = new RegExp(
+    `function ${componentName}\\(([A-Z])\\)\\{[^}]*\\{children:([A-Za-z])\\}=\\1`
+  );
+  // Legacy: function COMP({children:VAR}){
+  const signatureRegexLegacy = new RegExp(
     `function ${componentName}\\(\\{children:([A-Z])\\}\\)\\{`
   );
-  const signatureMatch = content.match(signatureRegex);
-  if (!signatureMatch) return null;
 
-  const childrenVar = signatureMatch[1];
-  const funcStart = content.indexOf(signatureMatch[0]);
+  let signatureMatch = content.match(signatureRegexNew);
+  let childrenVar, funcStart, signatureStr;
 
-  // Find the function body to extract internal variable names
-  // We need the React var and Text element used in push calls
-  // Pattern: ARRAY.push(REACT.default.createElement(TEXT,{key:...},STRING.trim()))
+  if (signatureMatch) {
+    // New format: function oO(A){...{children:q}=A
+    childrenVar = signatureMatch[2];
+    funcStart = content.indexOf(`function ${componentName}(${signatureMatch[1]})`);
+    signatureStr = signatureMatch[0];
+  } else {
+    signatureMatch = content.match(signatureRegexLegacy);
+    if (!signatureMatch) return null;
+    childrenVar = signatureMatch[1];
+    funcStart = content.indexOf(signatureMatch[0]);
+    signatureStr = signatureMatch[0];
+  }
 
-  // Search within ~1000 chars of the function start for the push pattern
+  // Search within ~1500 chars of the function start for the push pattern
   const funcRegion = content.substring(funcStart, funcStart + 1500);
 
   // Generic push pattern that captures the actual variable names
@@ -238,10 +249,10 @@ function detectContentComponentFunction(content, componentName) {
   const pushMatch = funcRegion.match(pushRegex);
 
   return {
-    signatureMatch: signatureMatch[0],
+    signatureMatch: signatureStr,
     childrenVar,
     funcStart,
-    // Push pattern info (may be null if not found)
+    isNewFormat: !!content.match(signatureRegexNew),
     pushInfo: pushMatch ? {
       fullMatch: pushMatch[0],
       arrayVar: pushMatch[1],
@@ -332,35 +343,27 @@ function getVersion(content) {
   return match ? match[1] : 'unknown';
 }
 
-// Extract the NbA thinking component that shows collapsed/expanded view (v2.1.x)
+// Extract the thinking component that shows collapsed/expanded view
 function extractThinkingComponent(content) {
-  // Match the NbA component that contains the collapsed "∴ Thinking (...)" text
-  // v2.1.3+: keyboard shortcut is now a variable: "∴ Thinking (",Y," to expand)"
-  // Unpatched: if(!(B||G))return $6A.default.createElement(...)
-  // Patched: if(!1)return $6A.default.createElement(...)
-  const collapsedRegex = /if\(!\(([A-Z])\|\|([A-Z])\)\)return ([\$A-Za-z0-9]+)\.default\.createElement\(([A-Z]),\{marginTop:[A-Z]\?1:0\},\3\.default\.createElement\(([\$A-Z]),\{dimColor:!0,italic:!0\},"∴ Thinking \(",[A-Z]," to expand\)"\)\);/;
-  const patchedRegex = /if\(!1\)return ([\$A-Za-z0-9]+)\.default\.createElement\(([A-Z]),\{marginTop:[A-Z]\?1:0\},\1\.default\.createElement\(([\$A-Z]),\{dimColor:!0,italic:!0\},"∴ Thinking \(",[A-Z]," to expand\)"\)\);/;
+  // v2.1.17+: Block-based structure with memoization
+  // Unpatched: if(!(z||w)){...,"∴ Thinking ("...}
+  // Patched: if(!1){...}
+  const collapsedRegex = /if\(!\(([a-zA-Z])\|\|([a-zA-Z])\)\)\{[^"]*"∴ Thinking \(/;
+  const patchedRegex = /if\(!1\)\{[^"]*"∴ Thinking \(/;
 
   let match = content.match(collapsedRegex);
   if (match) {
     return {
-      fullMatch: match[0],
+      fullMatch: `if(!(${match[1]}||${match[2]})){`,
       transcriptVar: match[1],
       verboseVar: match[2],
-      reactVar: match[3],
-      wrapperElement: match[4],
-      textElement: match[5],
       isPatched: false
     };
   }
 
-  match = content.match(patchedRegex);
-  if (match) {
+  if (content.match(patchedRegex)) {
     return {
-      fullMatch: match[0],
-      reactVar: match[1],
-      wrapperElement: match[2],
-      textElement: match[3],
+      fullMatch: 'if(!1){',
       isPatched: true
     };
   }
@@ -410,26 +413,35 @@ function extractBannerFunction(content) {
   };
 }
 
-// Detect the thinking case pattern (v2.1.x with hideInTranscript)
+// Detect the thinking case pattern
 function detectThinkingPatternV2(content) {
-  // Pattern: case"thinking":{if(!D&&!Z)return null;return XXX.createElement(YYY,{addMargin:Q,param:A,isTranscriptMode:D,verbose:Z,hideInTranscript:...}
-  const regex = /case"thinking":\{if\(!([A-Z])&&!([A-Z])\)return null;return ([A-Za-z0-9$]+)\.createElement\(([A-Za-z0-9]+),\{addMargin:([A-Z]),param:([A-Z]),isTranscriptMode:([A-Z]),verbose:([A-Z]),hideInTranscript:[^}]+\}/;
+  // Pattern: case"thinking":{if(!D&&!H)return null;...createElement(YW1,{addMargin:Y,param:q,isTranscriptMode:D,verbose:H,hideInTranscript:T})...}
+  const regex = /case"thinking":\{if\(!([A-Za-z])&&!([A-Za-z])\)return null;.*?([A-Za-z0-9$]+)\.createElement\(([A-Za-z0-9]+),\{addMargin:([A-Za-z]),param:([A-Za-z]),isTranscriptMode:([A-Za-z]),verbose:([A-Za-z]),hideInTranscript:([A-Za-z])\}/;
+
+  // Check for already patched (no guard, forced values)
+  const patchedRegex = /case"thinking":\{(?:let [A-Za-z]=)?[^}]*\.createElement\([A-Za-z0-9]+,\{addMargin:[A-Za-z],param:[A-Za-z],isTranscriptMode:!0,verbose:[A-Za-z],hideInTranscript:!1\}/;
+
   const match = content.match(regex);
+  if (match) {
+    return {
+      fullMatch: match[0],
+      guardVar1: match[1],
+      guardVar2: match[2],
+      reactVar: match[3],
+      componentName: match[4],
+      addMarginVar: match[5],
+      paramVar: match[6],
+      transcriptVar: match[7],
+      verboseVar: match[8],
+      hideInTranscriptVar: match[9]
+    };
+  }
 
-  if (!match) return null;
+  if (content.match(patchedRegex)) {
+    return { isPatched: true };
+  }
 
-  return {
-    fullMatch: match[0],
-    guardVar1: match[1],
-    guardVar2: match[2],
-    reactVar: match[3],
-    componentName: match[4],
-    addMarginVar: match[5],
-    paramVar: match[6],
-    transcriptVar: match[7],
-    verboseVar: match[8],
-    version: 'v2.1'
-  };
+  return null;
 }
 
 // Detect the expanded thinking header (v2.1.x) for color patching
@@ -605,17 +617,14 @@ function main() {
 
   console.log('🔬 Pattern Detection:');
 
-  // For v2.1.x, we patch the component instead of the banner
   if (thinkingComponentInfo) {
-    console.log(`   ✅ Thinking component: collapsed view detected (v2.1.x)`);
-  } else if (bannerInfo) {
-    console.log(`   ✅ Banner function: ${bannerInfo.funcName}() [${bannerInfo.fullFunction.length} chars]`);
+    console.log(`   ✅ Collapsed view: guard detected`);
   } else {
-    console.log('   ⚠️  Banner/component not detected');
+    console.log('   ⚠️  Collapsed view not detected');
   }
 
   if (thinkingInfo) {
-    console.log(`   ✅ Thinking case: component ${thinkingInfo.componentName} (${thinkingInfo.version})`);
+    console.log(`   ✅ Thinking case: component ${thinkingInfo.componentName}`);
   } else {
     console.log('   ⚠️  Thinking case not detected');
   }
@@ -671,22 +680,19 @@ function main() {
 
   console.log('\n📝 Applying patches:');
 
-  // Patch 1a: v2.1.x component patch - change if(!(B||G)) to if(!1) to never show collapsed
+  // Patch 1a: Disable collapsed view - change if(!(z||w)){ to if(!1){
   if (thinkingComponentInfo) {
     if (thinkingComponentInfo.isPatched) {
       console.log('   ⚠️  Component already patched');
     } else {
-      const replacement = thinkingComponentInfo.fullMatch.replace(
-        `if(!(${thinkingComponentInfo.transcriptVar}||${thinkingComponentInfo.verboseVar}))`,
-        'if(!1)'
-      );
+      const replacement = 'if(!1){';
 
       if (patched.includes(thinkingComponentInfo.fullMatch)) {
         if (!DRY_RUN) {
           patched = patched.replace(thinkingComponentInfo.fullMatch, replacement);
         }
         patchCount++;
-        console.log('   ✅ Component collapsed view disabled' + (DRY_RUN ? ' [DRY RUN]' : ''));
+        console.log('   ✅ Collapsed view disabled' + (DRY_RUN ? ' [DRY RUN]' : ''));
       } else {
         console.log('   ❌ Component patch failed - pattern mismatch');
       }
@@ -711,25 +717,24 @@ function main() {
 
   // Patch 2: Thinking visibility - remove guard and force transcript mode
   if (thinkingInfo) {
-    let replacement;
-    if (thinkingInfo.version === 'v2.1') {
-      // v2.1.x: case"thinking":{...} format with hideInTranscript
-      replacement = `case"thinking":{return ${thinkingInfo.reactVar}.createElement(${thinkingInfo.componentName},{addMargin:${thinkingInfo.addMarginVar},param:${thinkingInfo.paramVar},isTranscriptMode:!0,verbose:${thinkingInfo.verboseVar},hideInTranscript:!1}`;
-    } else {
-      // Legacy format
-      replacement = `case"thinking":return ${thinkingInfo.reactVar}.createElement(${thinkingInfo.componentName},{addMargin:${thinkingInfo.addMarginVar},param:${thinkingInfo.paramVar},isTranscriptMode:!0,verbose:${thinkingInfo.verboseVar}})`;
-    }
-
-    if (patched.includes(thinkingInfo.fullMatch)) {
-      if (!DRY_RUN) {
-        patched = patched.replace(thinkingInfo.fullMatch, replacement);
-      }
-      patchCount++;
-      console.log('   ✅ Thinking visibility' + (DRY_RUN ? ' [DRY RUN]' : ''));
-    } else if (patched.includes('case"thinking":') && patched.includes('isTranscriptMode:!0')) {
+    if (thinkingInfo.isPatched) {
       console.log('   ⚠️  Thinking already patched');
     } else {
-      console.log('   ❌ Thinking patch failed - pattern mismatch');
+      // Remove guard, force isTranscriptMode:!0 and hideInTranscript:!1
+      const replacement = thinkingInfo.fullMatch
+        .replace(`if(!${thinkingInfo.guardVar1}&&!${thinkingInfo.guardVar2})return null;`, '')
+        .replace(`isTranscriptMode:${thinkingInfo.transcriptVar}`, 'isTranscriptMode:!0')
+        .replace(`hideInTranscript:${thinkingInfo.hideInTranscriptVar}`, 'hideInTranscript:!1');
+
+      if (patched.includes(thinkingInfo.fullMatch)) {
+        if (!DRY_RUN) {
+          patched = patched.replace(thinkingInfo.fullMatch, replacement);
+        }
+        patchCount++;
+        console.log('   ✅ Thinking visibility forced' + (DRY_RUN ? ' [DRY RUN]' : ''));
+      } else {
+        console.log('   ❌ Thinking patch failed - pattern mismatch');
+      }
     }
   }
 
@@ -756,97 +761,84 @@ function main() {
     }
   }
 
-  // Patch 4: Custom color for thinking content (ANCHOR-BASED)
-  // Uses dynamically extracted variable names instead of hardcoded ones
-  // This uses Ink's native color prop which works reliably across line wraps
+  // Patch 4: Custom color for thinking content
+  // Thread color through: oO → o3 → i_ (Text element)
   if (resolvedContentColor && thinkingContentInfo) {
     if (thinkingContentInfo.isPatched) {
       console.log('   ⚠️  Content color already patched');
     } else {
       const colorValue = resolvedContentColor;
-      const contentComp = thinkingContentInfo.contentComponent; // dynamically detected
+      let contentPatched = false;
 
-      // Step 4a: Modify content component to accept color prop
-      // Use contentFuncInfo if available (from anchor-based detection)
-      let childrenVar;
-      if (contentFuncInfo) {
-        childrenVar = contentFuncInfo.childrenVar;
-        // Replace the signature directly using the detected match
+      // Step 4a: Modify o3 component to accept and forward color prop
+      // Find: o3=REACT.default.memo(function(K){...{children:Y}=K;
+      const o3Pattern = /(o3=([A-Za-z0-9]+)\.default\.memo\(function\([A-Z]\)\{[^}]*\{children:)([A-Z])(\}=)/;
+      const o3Match = patched.match(o3Pattern);
+
+      if (o3Match) {
+        const childrenVar = o3Match[3];
+        const reactVar = o3Match[2];
+
+        // Add color to destructuring: {children:Y}=K → {children:Y,color:$o3c}=K
         if (!DRY_RUN) {
-          const newSignature = `function ${contentComp}({children:${childrenVar},color:$TC}){`;
-          patched = patched.replace(contentFuncInfo.signatureMatch, newSignature);
+          patched = patched.replace(o3Match[0], `${o3Match[1]}${childrenVar},color:$o3c${o3Match[4]}`);
         }
-      } else {
-        // Fallback: detect signature with regex
-        const compSignatureRegex = new RegExp(`function ${contentComp}\\(\\{children:([A-Z])\\}\\)\\{`);
-        const compMatch = patched.match(compSignatureRegex);
-        if (compMatch) {
-          childrenVar = compMatch[1];
-          if (!DRY_RUN) {
-            const newSignature = `function ${contentComp}({children:${childrenVar},color:$TC}){`;
-            patched = patched.replace(compMatch[0], newSignature);
-          }
+
+        // Replace createElement(i_,null,...) with createElement(i_,{color:$o3c},...)
+        // There are 3 such calls in o3
+        const i_Pattern = new RegExp(`(${reactVar}\\.default\\.createElement\\(i_,)null(,)`, 'g');
+        if (!DRY_RUN) {
+          patched = patched.replace(i_Pattern, '$1{color:$o3c}$2');
         }
+
+        console.log(`   ✅ o3 component: color prop added` + (DRY_RUN ? ' [DRY RUN]' : ''));
+        contentPatched = true;
       }
 
-      if (!childrenVar) {
-        console.log(`   ❌ Content color patch failed - ${contentComp} signature not found`);
+      // Step 4b: Modify oO to accept color and pass to o3
+      // Find: function oO(A){...{children:q}=A
+      const oOPattern = /(function oO\([A-Z]\)\{[^}]*\{children:)([A-Za-z])(\}=)/;
+      const oOMatch = patched.match(oOPattern);
+
+      if (oOMatch) {
+        const childrenVar = oOMatch[2];
+        if (!DRY_RUN) {
+          patched = patched.replace(oOMatch[0], `${oOMatch[1]}${childrenVar},color:$oOc${oOMatch[3]}`);
+        }
+        console.log(`   ✅ oO component: color prop added` + (DRY_RUN ? ' [DRY RUN]' : ''));
+      }
+
+      // Step 4c: Pass color from oO's push calls to o3
+      // Find: .push(REACT.default.createElement(o3,{key:...},
+      const pushO3Pattern = /(\.push\([A-Za-z0-9]+\.default\.createElement\(o3,\{key:[A-Z]\.length)\}(,)/g;
+      if (pushO3Pattern.test(patched)) {
+        if (!DRY_RUN) {
+          patched = patched.replace(
+            /(\.push\([A-Za-z0-9]+\.default\.createElement\(o3,\{key:[A-Z]\.length)\}(,)/g,
+            '$1,color:$oOc}$2'
+          );
+        }
+        console.log(`   ✅ Push pattern: color forwarded to o3` + (DRY_RUN ? ' [DRY RUN]' : ''));
+      }
+
+      // Step 4d: Pass color to oO from the call site
+      const contentComp = thinkingContentInfo.contentComponent;
+      const reactVar = thinkingContentInfo.reactVar;
+      const contentVar = thinkingContentInfo.contentVar;
+      const callPattern = `${reactVar}.default.createElement(${contentComp},null,${contentVar})`;
+      const callReplacement = `${reactVar}.default.createElement(${contentComp},{color:'${colorValue}'},${contentVar})`;
+
+      if (patched.includes(callPattern)) {
+        if (!DRY_RUN) {
+          patched = patched.replace(callPattern, callReplacement);
+        }
+        patchCount++;
+        console.log(`   ✅ Content color: ${resolvedContentColor}` + (DRY_RUN ? ' [DRY RUN]' : ''));
+      } else if (contentPatched) {
+        patchCount++;
+        console.log(`   ✅ Content color: ${resolvedContentColor}` + (DRY_RUN ? ' [DRY RUN]' : ''));
       } else {
-        // Step 4b: Find and wrap text elements with color
-        // Use dynamically detected variable names from contentFuncInfo
-        let flushPatched = false;
-
-        if (contentFuncInfo?.pushInfo) {
-          // ANCHOR-BASED: Use extracted variable names
-          const { arrayVar, reactVar, textElement, stringVar } = contentFuncInfo.pushInfo;
-
-          // Build the exact pattern we detected
-          const exactPushPattern = contentFuncInfo.pushInfo.fullMatch;
-
-          // Build replacement with color wrapper, preserving the actual element names
-          // We wrap with a Text element that has color, using $ as Text (standard Ink)
-          // But we need to find the actual Text import name - use the same reactVar
-          const replacement = `${arrayVar}.push(${reactVar}.default.createElement($,{key:${arrayVar}.length,color:$TC},${reactVar}.default.createElement(${textElement},null,(${stringVar}||'').trim())))`;
-
-          if (patched.includes(exactPushPattern)) {
-            if (!DRY_RUN) {
-              // Replace all occurrences (there may be multiple push calls)
-              patched = patched.split(exactPushPattern).join(replacement);
-            }
-            flushPatched = true;
-            console.log(`   ✅ Push pattern patched [anchor-based: ${textElement}]` + (DRY_RUN ? ' [DRY RUN]' : ''));
-          }
-        }
-
-        if (!flushPatched) {
-          // FALLBACK: Try generic regex pattern matching
-          // This is less robust but works as a fallback
-          const genericPushRegex = /([A-Z])\.push\(([A-Za-z0-9$_]+)\.default\.createElement\(([A-Za-z0-9$_]+),\{key:\1\.length\},([A-Z])\.trim\(\)\)\)/g;
-
-          if (genericPushRegex.test(patched)) {
-            if (!DRY_RUN) {
-              patched = patched.replace(genericPushRegex, (match, arrVar, rVar, textEl, strVar) => {
-                return `${arrVar}.push(${rVar}.default.createElement($,{key:${arrVar}.length,color:$TC},${rVar}.default.createElement(${textEl},null,(${strVar}||'').trim())))`;
-              });
-            }
-            flushPatched = true;
-            console.log(`   ✅ Push pattern patched [regex fallback]` + (DRY_RUN ? ' [DRY RUN]' : ''));
-          }
-        }
-
-        // Step 4c: Modify the call site to pass color prop
-        const callPattern = `${thinkingContentInfo.reactVar}.default.createElement(${contentComp},null,${thinkingContentInfo.contentVar})`;
-        const callReplacement = `${thinkingContentInfo.reactVar}.default.createElement(${contentComp},{color:'${colorValue}'},${thinkingContentInfo.contentVar})`;
-
-        if (patched.includes(callPattern)) {
-          if (!DRY_RUN) {
-            patched = patched.replace(callPattern, callReplacement);
-          }
-          patchCount++;
-          console.log(`   ✅ Content color: ${resolvedContentColor} (via Ink color prop)` + (DRY_RUN ? ' [DRY RUN]' : ''));
-        } else {
-          console.log(`   ❌ Content color patch failed - ${contentComp} call pattern mismatch`);
-        }
+        console.log(`   ❌ Content color call site not found`);
       }
     }
   }

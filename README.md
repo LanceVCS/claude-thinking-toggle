@@ -2,16 +2,20 @@
 
 Makes Claude Code's thinking blocks visible by default and adds custom color support.
 
+## Quick Start
+
+```bash
+node thinker.js --theme=watermelon
+```
+
 ## Implementations
 
-This tool has two implementations:
+| File | Status |
+|------|--------|
+| `thinker.js` | **Active** - updated for v2.1.17 |
+| `thinker-ast.js` | On hiatus |
 
-| File | Approach | Status |
-|------|----------|--------|
-| `thinker-ast.js` | **AST-based** (Acorn + magic-string) | **Recommended** - more robust |
-| `thinker.js` | Regex-based | Legacy - may break on updates |
-
-**We recommend using `thinker-ast.js`** - it uses proper JavaScript parsing to find patch targets via stable string anchors (like `"∴ Thinking…"`) rather than fragile regex patterns that break when minifier variable names change.
+Both implementations break on major Claude Code updates due to minifier changes. The regex-based `thinker.js` is simpler to maintain and debug, so we're using it as the primary implementation.
 
 ## Features
 
@@ -24,28 +28,25 @@ This tool has two implementations:
 
 ```bash
 # Basic - show thinking with default styling
-node thinker-ast.js
+node thinker.js
 
 # Use a preset theme
-node thinker-ast.js --theme=watermelon
+node thinker.js --theme=watermelon
 
 # Custom color for both header and content
-node thinker-ast.js --color=pink
+node thinker.js --color=pink
 
 # Separate colors for header and content
-node thinker-ast.js --color=green --content-color=pink
+node thinker.js --color=green --content-color=pink
 
 # Preview changes without applying
-node thinker-ast.js --dry-run
+node thinker.js --dry-run
 
 # Restore original Claude Code
-node thinker-ast.js --restore
+node thinker.js --restore
 
 # Check if current version is patchable
-node thinker-ast.js --check
-
-# Show help
-node thinker-ast.js --help
+node thinker.js --check
 ```
 
 ## Color Options
@@ -58,7 +59,7 @@ pink, orange, purple, teal, gold, lime, coral, sky
 
 ### Custom Hex
 ```bash
-node thinker-ast.js --color=#ff69b4 --content-color=#32cd32
+node thinker.js --color=#ff69b4 --content-color=#32cd32
 ```
 
 ## Theme Presets
@@ -90,18 +91,11 @@ Use `--theme=NAME` for quick preset combos:
 - Node.js
 - Claude Code CLI installed globally
 
-### For AST version (thinker-ast.js)
-```bash
-cd ~/.claude/tools/claude-thinking-toggle
-npm install
-```
-This installs: `acorn`, `acorn-walk`, `magic-string`
-
 ## Notes
 
 - Re-run after Claude Code updates (the patch targets specific code patterns)
 - A backup is created automatically at `cli.js.backup`
-- Tested with Claude Code v2.1.x
+- Tested with Claude Code v2.1.17
 
 ## How It Works
 
