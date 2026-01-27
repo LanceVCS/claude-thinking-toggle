@@ -923,9 +923,16 @@ function main() {
           '$1$2,color:$tc$3'
         );
 
-        // Replace s_ calls within t3 only
+        // Replace s_ calls within t3 only (literal s_)
         t3Body = t3Body.replace(
           /(createElement\(s_,)null(,)/g,
+          '$1{color:$tc}$2'
+        );
+
+        // Also replace createElement(z,null,w) where z=s_ (styled content path)
+        // This handles: z=s_,w=X.map(nd3)...createElement(z,null,w)
+        t3Body = t3Body.replace(
+          /(createElement\(z,)null(,)/g,
           '$1{color:$tc}$2'
         );
 
