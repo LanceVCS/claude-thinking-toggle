@@ -377,12 +377,15 @@ function getReactVarFromCall(callExpr) {
 
 /**
  * Find all string literals matching a value using walk.simple
+ * @param {object} ast - Parsed AST
+ * @param {string|RegExp|function} matcher - Exact string, regex, or predicate function
  */
-function findStringLiterals(ast, value) {
+function findStringLiterals(ast, matcher) {
   const matches = [];
+  const matchFn = createMatcher(matcher);
   walk.simple(ast, {
     Literal(node) {
-      if (node.value === value) {
+      if (typeof node.value === 'string' && matchFn(node.value)) {
         matches.push(node);
       }
     }
@@ -392,12 +395,15 @@ function findStringLiterals(ast, value) {
 
 /**
  * Find string literals with ancestor information using walk.ancestor
+ * @param {object} ast - Parsed AST
+ * @param {string|RegExp|function} matcher - Exact string, regex, or predicate function
  */
-function findStringLiteralsWithAncestors(ast, value) {
+function findStringLiteralsWithAncestors(ast, matcher) {
   const matches = [];
+  const matchFn = createMatcher(matcher);
   walk.ancestor(ast, {
     Literal(node, ancestors) {
-      if (node.value === value) {
+      if (typeof node.value === 'string' && matchFn(node.value)) {
         matches.push({ node, ancestors: [...ancestors] });
       }
     }
@@ -406,24 +412,59 @@ function findStringLiteralsWithAncestors(ast, value) {
 }
 
 /**
- * Find the expanded header "∴ Thinking…" createElement call
- * Uses proper AST traversal instead of regex
+ * Create a matcher function from various input types
+ * @param {string|RegExp|function} matcher - Exact string, regex, or predicate
+ * @returns {function} - Predicate function (value) => boolean
+ */
+function createMatcher(matcher) {
+  if (typeof matcher === 'function') {
+    return matcher;
+  }
+  if (matcher instanceof RegExp) {
+    return (value) => matcher.test(value);
+  }
+  // Exact string match
+  return (value) => value === matcher;
+}
+
+/**
+ * Fuzzy matcher for "∴ Thinking" variants
+ * Matches: "∴ Thinking", "∴ Thinking…", "∴ Thinking (" etc.
+ */
+function thinkingHeaderMatcher(value) {
+  return typeof value === 'string' && value.startsWith('∴ Thinking');
+}
+
+/**
+ * Matcher for collapsed view text "∴ Thinking (" or just "∴ Thinking"
+ * In v2.1.20+, the " (" part may be separate
+ */
+function thinkingCollapsedMatcher(value) {
+  return typeof value === 'string' &&
+    (value.startsWith('∴ Thinking (') || value === '∴ Thinking');
+}
+
+/**
+ * Find the expanded header "∴ Thinking" createElement call
+ * Uses fuzzy matching to handle variants: "∴ Thinking", "∴ Thinking…", etc.
  * Returns: { callExpr, propsNode, reactVar, textElement, propsStart, propsEnd, isPatched }
  */
 function findExpandedHeader(ast, code) {
-  const matches = findStringLiteralsWithAncestors(ast, '∴ Thinking…');
-  debug(`Found ${matches.length} "∴ Thinking…" literals`);
+  // Use fuzzy matcher to find "∴ Thinking" variants
+  const matches = findStringLiteralsWithAncestors(ast, thinkingHeaderMatcher);
+  debug(`Found ${matches.length} "∴ Thinking*" literals (fuzzy match)`);
 
   if (matches.length === 0) {
     return { error: 'NOT_FOUND', count: 0 };
   }
 
   // Find matches that are children of createElement calls
+  // Strategy 1: Literal directly in createElement
+  // Strategy 2: Literal assigned to variable, variable used in createElement (v2.1.20+)
   const validMatches = [];
 
   for (const { node: literal, ancestors } of matches) {
-    // Walk up ancestors to find first CallExpression that is a createElement call
-    // (not just the nearest CallExpression, which could be e.g. "∴ Thinking…".slice())
+    // Strategy 1: Walk up ancestors to find first CallExpression that is a createElement call
     let callExpr = null;
     for (let i = ancestors.length - 2; i >= 0; i--) {
       if (ancestors[i].type === 'CallExpression' && isCreateElementCall(ancestors[i])) {
@@ -431,7 +472,34 @@ function findExpandedHeader(ast, code) {
         break;
       }
     }
-    if (!callExpr) continue;
+
+    // Strategy 2: If not in createElement, check if assigned to variable
+    // Pattern: W="∴ Thinking" ... createElement(f, {...}, D, "…") where D=W
+    if (!callExpr) {
+      // Check if literal is in an AssignmentExpression
+      const assignmentAncestor = findAncestorOfType(ancestors, 'AssignmentExpression');
+      if (assignmentAncestor) {
+        const assignment = assignmentAncestor.node;
+        // Get the variable name being assigned to
+        if (assignment.left?.type === 'Identifier') {
+          const varName = assignment.left.name;
+          debug(`Literal assigned to variable: ${varName}`);
+          // For v2.1.20+, we found the variable - mark this as a valid indirect match
+          // The actual createElement will be found via contentWrapper using paddingLeft anchor
+          validMatches.push({
+            literal,
+            callExpr: null,  // No direct createElement
+            propsNode: null,
+            reactVar: null,
+            textElement: null,
+            isPatched: false,
+            isIndirect: true,
+            variableName: varName
+          });
+        }
+      }
+      continue;
+    }
 
     // Verify the literal is in a child position (arguments[2+])
     // The literal should be the text content, not the type or props
@@ -473,16 +541,39 @@ function findExpandedHeader(ast, code) {
   }
 
   if (validMatches.length === 0) {
-    debug('No valid createElement calls found containing "∴ Thinking…"');
+    debug('No valid createElement calls found containing "∴ Thinking*"');
     return { error: 'PATTERN_MISMATCH' };
   }
 
-  if (validMatches.length > 1) {
-    debug(`Ambiguous: found ${validMatches.length} potential header locations`);
-    return { error: 'AMBIGUOUS', count: validMatches.length };
+  // Prefer direct matches over indirect ones
+  const directMatches = validMatches.filter(m => !m.isIndirect);
+  const indirectMatches = validMatches.filter(m => m.isIndirect);
+
+  if (directMatches.length > 1) {
+    debug(`Ambiguous: found ${directMatches.length} potential header locations`);
+    return { error: 'AMBIGUOUS', count: directMatches.length };
   }
 
-  const match = validMatches[0];
+  // Use direct match if available, otherwise use indirect
+  const match = directMatches[0] || indirectMatches[0];
+
+  if (match.isIndirect) {
+    // v2.1.20+ style: literal assigned to variable
+    debug(`Using indirect match via variable: ${match.variableName}`);
+    return {
+      success: true,
+      literal: match.literal,
+      callExpr: null,
+      propsNode: null,
+      reactVar: null,
+      textElement: null,
+      propsStart: null,
+      propsEnd: null,
+      isPatched: false,
+      isIndirect: true,
+      variableName: match.variableName
+    };
+  }
 
   return {
     success: true,
@@ -498,13 +589,25 @@ function findExpandedHeader(ast, code) {
 }
 
 /**
- * Find the collapsed view with "∴ Thinking (" and the guard condition
- * Uses proper AST traversal instead of regex
+ * Find the collapsed view with the guard condition
+ * Uses multiple anchor strategies:
+ * - v2.1.19: Single string "∴ Thinking ("
+ * - v2.1.20+: Separate strings, use " to expand)" as anchor
  * Returns: { ifStmt, conditionStart, conditionEnd, isPatched }
  */
 function findCollapsedView(ast, code) {
-  const matches = findStringLiteralsWithAncestors(ast, '∴ Thinking (');
-  debug(`Found ${matches.length} "∴ Thinking (" literals`);
+  // Combine multiple anchor strategies:
+  // - v2.1.19: "∴ Thinking (" as single string (literal directly in if block)
+  // - v2.1.20+: " to expand)" as anchor (literal is a variable, but this string is in if block)
+  let matches = findStringLiteralsWithAncestors(ast, thinkingCollapsedMatcher);
+  debug(`Found ${matches.length} "∴ Thinking*" collapsed literals`);
+
+  // Also try " to expand)" anchor - in v2.1.20+ this is inside the if block
+  const expandMatches = findStringLiteralsWithAncestors(ast, ' to expand)');
+  debug(`Found ${expandMatches.length} " to expand)" literals`);
+
+  // Combine both sets of matches
+  matches = [...matches, ...expandMatches];
 
   if (matches.length === 0) {
     return { error: 'NOT_FOUND', count: 0 };
@@ -514,12 +617,34 @@ function findCollapsedView(ast, code) {
   const validMatches = [];
 
   for (const { node: literal, ancestors } of matches) {
-    // Walk up ancestors to find IfStatement
-    const ifResult = findAncestorOfType(ancestors, 'IfStatement');
-    if (!ifResult) continue;
+    // Walk up ancestors to find ALL IfStatements (could be nested)
+    // We want the one with !G or !(A||B) pattern, not cache-check ifs like if(K[3]!==...)
+    const allIfStatements = [];
+    for (let i = ancestors.length - 2; i >= 0; i--) {
+      if (ancestors[i].type === 'IfStatement') {
+        allIfStatements.push(ancestors[i]);
+      }
+    }
+    if (allIfStatements.length === 0) continue;
 
-    const ifStmt = ifResult.node;
-    const test = ifStmt.test;
+    // Find the if with our guard pattern (!G or !(A||B) or already patched !1)
+    let ifStmt = null;
+    let test = null;
+    for (const candidate of allIfStatements) {
+      const t = candidate.test;
+      // Check for !VAR, !(A||B), or !1 (patched)
+      if (t.type === 'UnaryExpression' && t.operator === '!') {
+        const arg = t.argument;
+        if (arg.type === 'Identifier' ||
+            (arg.type === 'LogicalExpression' && arg.operator === '||') ||
+            (arg.type === 'Literal' && arg.value === 1)) {
+          ifStmt = candidate;
+          test = t;
+          break;
+        }
+      }
+    }
+    if (!ifStmt) continue;
 
     // Check if already patched: if(!1) - UnaryExpression with Literal 1
     if (test.type === 'UnaryExpression' && test.operator === '!' &&
@@ -761,7 +886,7 @@ function buildSwitchCaseResult(match) {
  * Returns: { wrapperCall, contentCall, contentComponent, isPatched }
  */
 function findContentWrapper(ast, code) {
-  // Find "∴ Thinking…" header first as anchor
+  // Find "∴ Thinking*" header first as anchor (fuzzy match)
   const headerResult = findExpandedHeader(ast, code);
   if (!headerResult.success) {
     return { error: 'HEADER_NOT_FOUND' };
@@ -1191,9 +1316,40 @@ function applyPatches(code, ast, detections, colors) {
   // Patch 3: Header color (optional)
   if (colors.headerColor && detections.expandedHeader.success && !detections.expandedHeader.isPatched) {
     const eh = detections.expandedHeader;
-    const newProps = `{italic:!0,color:"${colors.headerColor}"}`;
-    ms.overwrite(eh.propsStart, eh.propsEnd, newProps);
-    patches.push(`Header color: ${colors.headerColor}`);
+
+    if (eh.isIndirect) {
+      // v2.1.20+: Literal is assigned to variable, find createElement via "…" anchor
+      // Pattern: createElement(f, {dimColor:!0,italic:!0}, D, "…")
+      const ellipsisMatches = findStringLiteralsWithAncestors(ast, '…');
+      let headerPatched = false;
+      for (const { node: ellipsis, ancestors } of ellipsisMatches) {
+        if (headerPatched) break;
+        // Find containing createElement
+        for (let i = ancestors.length - 2; i >= 0; i--) {
+          if (ancestors[i].type === 'CallExpression' && isCreateElementCall(ancestors[i])) {
+            const callExpr = ancestors[i];
+            const propsNode = callExpr.arguments[1];
+            if (propsNode?.type === 'ObjectExpression') {
+              // Check if this has dimColor prop (confirms it's the header)
+              const dimColorProp = findObjectProperty(propsNode, 'dimColor');
+              if (dimColorProp) {
+                const newProps = `{italic:!0,color:"${colors.headerColor}"}`;
+                ms.overwrite(propsNode.start, propsNode.end, newProps);
+                patches.push(`Header color: ${colors.headerColor} (v2.1.20+)`);
+                headerPatched = true;
+                break;
+              }
+            }
+            break;
+          }
+        }
+      }
+    } else {
+      // Direct match: literal is inside createElement
+      const newProps = `{italic:!0,color:"${colors.headerColor}"}`;
+      ms.overwrite(eh.propsStart, eh.propsEnd, newProps);
+      patches.push(`Header color: ${colors.headerColor}`);
+    }
   } else if (colors.headerColor && detections.expandedHeader.isPatched) {
     patches.push('Header color (already patched)');
   }

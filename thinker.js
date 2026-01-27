@@ -371,16 +371,26 @@ function extractThinkingComponent(content) {
   return null;
 }
 
-// v2.1.19+: Extract thinking component from oG1 function
+// v2.1.19+: Extract thinking component from oG1/Ej1 function
 // The collapsed view is now controlled by: let G=z||w; if(!G){...}
 function extractThinkingComponentV219(content) {
-  // Find the oG1 function signature to get variable names
-  const oG1Pattern = /function oG1\(([A-Z])\)\{let K=a\(17\),\{param:([a-zA-Z]),addMargin:([a-zA-Z]),isTranscriptMode:([a-zA-Z]),verbose:([a-zA-Z]),hideInTranscript:([a-zA-Z])\}=/;
-  const funcMatch = content.match(oG1Pattern);
+  // Try v2.1.20 pattern first (Ej1 with s() hook)
+  let funcMatch = content.match(/function ([A-Za-z0-9]+)\(([A-Z])\)\{let [A-Z]=s\(\d+\),\{param:([a-zA-Z]),addMargin:([a-zA-Z]),isTranscriptMode:([a-zA-Z]),verbose:([a-zA-Z]),hideInTranscript:([a-zA-Z])\}=/);
+
+  // Fallback to v2.1.19 pattern (oG1 with a() hook)
+  if (!funcMatch) {
+    funcMatch = content.match(/function oG1\(([A-Z])\)\{let K=a\(17\),\{param:([a-zA-Z]),addMargin:([a-zA-Z]),isTranscriptMode:([a-zA-Z]),verbose:([a-zA-Z]),hideInTranscript:([a-zA-Z])\}=/);
+    if (funcMatch) {
+      // Adjust indices for the older pattern (no function name capture)
+      funcMatch = [funcMatch[0], 'oG1', funcMatch[1], funcMatch[2], funcMatch[3], funcMatch[4], funcMatch[5], funcMatch[6]];
+    }
+  }
+
   if (!funcMatch) return null;
 
-  const transcriptVar = funcMatch[4];
-  const verboseVar = funcMatch[5];
+  const funcName = funcMatch[1];
+  const transcriptVar = funcMatch[5];
+  const verboseVar = funcMatch[6];
 
   // Find the G assignment: let G=z||w,
   const guardPattern = new RegExp(`let G=(${transcriptVar})\\|\\|(${verboseVar}),`);
@@ -391,8 +401,9 @@ function extractThinkingComponentV219(content) {
       fullMatch: `let G=${transcriptVar}||${verboseVar},`,
       transcriptVar,
       verboseVar,
+      funcName,
       isPatched: false,
-      version: 'v2.1.19'
+      version: 'v2.1.19+'
     };
   }
 
@@ -400,8 +411,9 @@ function extractThinkingComponentV219(content) {
   if (content.includes('let G=!0,')) {
     return {
       fullMatch: 'let G=!0,',
+      funcName,
       isPatched: true,
-      version: 'v2.1.19'
+      version: 'v2.1.19+'
     };
   }
 
@@ -871,88 +883,164 @@ function main() {
     }
   }
 
-  // Patch 4: Custom color for thinking content (v2.1.19)
-  // Thread color through: qO → t3 → s_
+  // Patch 4: Custom color for thinking content
+  // v2.1.19: Thread color through: qO → t3 → s_
+  // v2.1.20+: Thread color through: P0 → A9 → OZ (or Text wrapper)
   if (resolvedContentColor && thinkingContentInfo) {
     if (thinkingContentInfo.isPatched) {
       console.log('   ⚠️  Content color already patched');
     } else {
       const colorValue = resolvedContentColor;
-      const contentComp = thinkingContentInfo.contentComponent;
+      const contentComp = thinkingContentInfo.contentComponent;  // qO or P0
       const reactVar = thinkingContentInfo.reactVar;
       const contentVar = thinkingContentInfo.contentVar;
       let colorPatchCount = 0;
 
-      // Step 4a: Modify qO to accept color prop
-      // Find: {children:q}=A in qO function
-      const qOPattern = /(function qO\([A-Z]\)\{[^}]*\{children:)([a-zA-Z])(\}=)/;
-      const qOMatch = patched.match(qOPattern);
-      if (qOMatch && !DRY_RUN) {
-        patched = patched.replace(qOMatch[0], `${qOMatch[1]}${qOMatch[2]},color:$qc${qOMatch[3]}`);
-        colorPatchCount++;
-      }
+      // Detect version based on content component name
+      const isV220Plus = contentComp === 'P0';
 
-      // Step 4b: Forward color from qO to t3
-      // Find: createElement(t3,{key:X.length}, in qO
-      if (!DRY_RUN) {
-        const before = patched;
-        patched = patched.replace(
-          /(createElement\(t3,\{key:[A-Z]\.length)\}(,)/g,
-          '$1,color:$qc}$2'
-        );
-        if (patched !== before) colorPatchCount++;
-      }
+      if (isV220Plus) {
+        // v2.1.20+ patching strategy:
+        // Thread color through: P0 → A9 → OZ
+        // OZ already supports color prop, we just need to thread it through
 
-      // Step 4c: Modify t3 to accept color prop AND forward to s_
-      // Find t3 function, add color prop, and replace s_ calls within it
-      const t3Start = patched.indexOf('t3=');
-      if (t3Start !== -1 && !DRY_RUN) {
-        // Find the memo function end by tracking parentheses
-        let depth = 0, started = false, t3End = t3Start;
-        for (let i = t3Start; i < patched.length && i < t3Start + 2000; i++) {
-          if (patched[i] === '(') { depth++; started = true; }
-          if (patched[i] === ')') { depth--; if (started && depth === 0) { t3End = i + 1; break; } }
-        }
-
-        // Extract t3 function body
-        let t3Body = patched.substring(t3Start, t3End);
-
-        // Add color to destructuring: {children:Y}=K → {children:Y,color:$tc}=K
-        t3Body = t3Body.replace(
-          /(\{children:)([A-Z])(\}=[A-Z])/,
-          '$1$2,color:$tc$3'
-        );
-
-        // Replace s_ calls within t3 only (literal s_)
-        t3Body = t3Body.replace(
-          /(createElement\(s_,)null(,)/g,
-          '$1{color:$tc}$2'
-        );
-
-        // Also replace createElement(z,null,w) where z=s_ (styled content path)
-        // This handles: z=s_,w=X.map(nd3)...createElement(z,null,w)
-        t3Body = t3Body.replace(
-          /(createElement\(z,)null(,)/g,
-          '$1{color:$tc}$2'
-        );
-
-        // Replace in full content
-        patched = patched.substring(0, t3Start) + t3Body + patched.substring(t3End);
-        colorPatchCount += 2;
-      }
-
-      // Step 4e: Inject color at qO call site
-      const callPattern = `${reactVar}.default.createElement(${contentComp},null,${contentVar})`;
-      const callReplacement = `${reactVar}.default.createElement(${contentComp},{color:'${colorValue}'},${contentVar})`;
-
-      if (patched.includes(callPattern)) {
-        if (!DRY_RUN) {
-          patched = patched.replace(callPattern, callReplacement);
+        // Step 1: Modify P0 to accept color prop
+        // Find: function P0(A){let K=s(4),{children:q}=A
+        // Change to: function P0(A){let K=s(4),{children:q,color:$pc}=A
+        const p0Pattern = /(function P0\([A-Z]\)\{let [A-Z]=s\(\d+\),\{children:)([a-zA-Z])(\}=[A-Z])/;
+        const p0Match = patched.match(p0Pattern);
+        if (p0Match && !DRY_RUN) {
+          patched = patched.replace(p0Match[0], `${p0Match[1]}${p0Match[2]},color:$pc${p0Match[3]}`);
+          colorPatchCount++;
+        } else if (p0Match) {
           colorPatchCount++;
         }
-        patchCount++;
-        console.log(`   ✅ Content color: ${resolvedContentColor} (${colorPatchCount} modifications)` + (DRY_RUN ? ' [DRY RUN]' : ''));
-      } else if (colorPatchCount > 0) {
+
+        // Step 2: Forward color from P0 to A9
+        // Find: createElement(A9,{key:O.length},X.trim())
+        // Change to: createElement(A9,{key:O.length,color:$pc},X.trim())
+        if (!DRY_RUN) {
+          const before = patched;
+          patched = patched.replace(
+            /createElement\(A9,\{key:([A-Z])\.length\}/g,
+            'createElement(A9,{key:$1.length,color:$pc}'
+          );
+          if (patched !== before) colorPatchCount++;
+        } else {
+          if (/createElement\(A9,\{key:[A-Z]\.length\}/.test(patched)) colorPatchCount++;
+        }
+
+        // Step 3: Modify A9 to accept color and pass to OZ
+        // A9 is: A9=Ik.default.memo(function(K){let q=s(9),{children:Y}=K;...
+        // Change {children:Y} to {children:Y,color:$ac}
+        const a9Pattern = /(A9=[A-Za-z0-9]+\.default\.memo\(function\([A-Z]\)\{let [a-z]=s\(\d+\),\{children:)([A-Z])(\}=[A-Z])/;
+        const a9Match = patched.match(a9Pattern);
+        if (a9Match && !DRY_RUN) {
+          patched = patched.replace(a9Match[0], `${a9Match[1]}${a9Match[2]},color:$ac${a9Match[3]}`);
+          colorPatchCount++;
+        } else if (a9Match) {
+          colorPatchCount++;
+        }
+
+        // Step 4: Pass color to OZ in A9's createElement calls
+        // Find: createElement(OZ,null,... -> createElement(OZ,{color:$ac},...
+        // But only within A9 function (find A9 boundaries first)
+        const a9Start = patched.indexOf('A9=Ik.default.memo(function');
+        if (a9Start !== -1 && !DRY_RUN) {
+          // Find end of A9 by counting parens
+          let depth = 0, started = false, a9End = a9Start;
+          for (let i = a9Start; i < patched.length && i < a9Start + 2000; i++) {
+            if (patched[i] === '(') { depth++; started = true; }
+            if (patched[i] === ')') { depth--; if (started && depth === 0) { a9End = i + 1; break; } }
+          }
+
+          let a9Body = patched.substring(a9Start, a9End);
+          const beforeA9 = a9Body;
+
+          // Replace createElement(OZ,null, with createElement(OZ,{color:$ac},
+          a9Body = a9Body.replace(/createElement\(OZ,null,/g, 'createElement(OZ,{color:$ac},');
+
+          // Also handle createElement(z,null, where z=OZ
+          a9Body = a9Body.replace(/createElement\(z,null,/g, 'createElement(z,{color:$ac},');
+
+          if (a9Body !== beforeA9) {
+            patched = patched.substring(0, a9Start) + a9Body + patched.substring(a9End);
+            colorPatchCount++;
+          }
+        }
+
+        // Step 5: Inject color at P0 call site
+        const callPattern = `${reactVar}.default.createElement(${contentComp},null,${contentVar})`;
+        const callReplacement = `${reactVar}.default.createElement(${contentComp},{color:'${colorValue}'},${contentVar})`;
+
+        if (patched.includes(callPattern)) {
+          colorPatchCount++;
+          if (!DRY_RUN) {
+            patched = patched.replace(callPattern, callReplacement);
+          }
+        }
+
+      } else {
+        // v2.1.19 patching strategy (original):
+        // Thread color through: qO → t3 → s_
+
+        // Step 4a: Modify qO to accept color prop
+        const qOPattern = /(function qO\([A-Z]\)\{[^}]*\{children:)([a-zA-Z])(\}=)/;
+        const qOMatch = patched.match(qOPattern);
+        if (qOMatch && !DRY_RUN) {
+          patched = patched.replace(qOMatch[0], `${qOMatch[1]}${qOMatch[2]},color:$qc${qOMatch[3]}`);
+          colorPatchCount++;
+        }
+
+        // Step 4b: Forward color from qO to t3
+        if (!DRY_RUN) {
+          const before = patched;
+          patched = patched.replace(
+            /(createElement\(t3,\{key:[A-Z]\.length)\}(,)/g,
+            '$1,color:$qc}$2'
+          );
+          if (patched !== before) colorPatchCount++;
+        }
+
+        // Step 4c: Modify t3 to accept color prop AND forward to s_
+        const t3Start = patched.indexOf('t3=');
+        if (t3Start !== -1 && !DRY_RUN) {
+          let depth = 0, started = false, t3End = t3Start;
+          for (let i = t3Start; i < patched.length && i < t3Start + 2000; i++) {
+            if (patched[i] === '(') { depth++; started = true; }
+            if (patched[i] === ')') { depth--; if (started && depth === 0) { t3End = i + 1; break; } }
+          }
+
+          let t3Body = patched.substring(t3Start, t3End);
+          t3Body = t3Body.replace(
+            /(\{children:)([A-Z])(\}=[A-Z])/,
+            '$1$2,color:$tc$3'
+          );
+          t3Body = t3Body.replace(
+            /(createElement\(s_,)null(,)/g,
+            '$1{color:$tc}$2'
+          );
+          t3Body = t3Body.replace(
+            /(createElement\(z,)null(,)/g,
+            '$1{color:$tc}$2'
+          );
+          patched = patched.substring(0, t3Start) + t3Body + patched.substring(t3End);
+          colorPatchCount += 2;
+        }
+
+        // Step 4d: Inject color at qO call site
+        const callPattern = `${reactVar}.default.createElement(${contentComp},null,${contentVar})`;
+        const callReplacement = `${reactVar}.default.createElement(${contentComp},{color:'${colorValue}'},${contentVar})`;
+
+        if (patched.includes(callPattern)) {
+          if (!DRY_RUN) {
+            patched = patched.replace(callPattern, callReplacement);
+            colorPatchCount++;
+          }
+        }
+      }
+
+      if (colorPatchCount > 0) {
         patchCount++;
         console.log(`   ✅ Content color: ${resolvedContentColor} (${colorPatchCount} modifications)` + (DRY_RUN ? ' [DRY RUN]' : ''));
       } else {
