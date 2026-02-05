@@ -371,49 +371,45 @@ function extractThinkingComponent(content) {
   return null;
 }
 
-// v2.1.19+: Extract thinking component from oG1/Ej1 function
-// The collapsed view is now controlled by: let G=z||w; if(!G){...}
+// v2.1.32: Extract thinking component from Cj6 function
+// The collapsed view is controlled by: let D=z,j; where z=isTranscriptMode
+// Patching: change "let D=z,j;" to "let D=!0,j;" to force expanded view
 function extractThinkingComponentV219(content) {
-  // Try v2.1.20 pattern first (Ej1 with s() hook)
-  let funcMatch = content.match(/function ([A-Za-z0-9]+)\(([A-Z])\)\{let [A-Z]=s\(\d+\),\{param:([a-zA-Z]),addMargin:([a-zA-Z]),isTranscriptMode:([a-zA-Z]),verbose:([a-zA-Z]),hideInTranscript:([a-zA-Z])\}=/);
-
-  // Fallback to v2.1.19 pattern (oG1 with a() hook)
-  if (!funcMatch) {
-    funcMatch = content.match(/function oG1\(([A-Z])\)\{let K=a\(17\),\{param:([a-zA-Z]),addMargin:([a-zA-Z]),isTranscriptMode:([a-zA-Z]),verbose:([a-zA-Z]),hideInTranscript:([a-zA-Z])\}=/);
-    if (funcMatch) {
-      // Adjust indices for the older pattern (no function name capture)
-      funcMatch = [funcMatch[0], 'oG1', funcMatch[1], funcMatch[2], funcMatch[3], funcMatch[4], funcMatch[5], funcMatch[6]];
-    }
-  }
+  // v2.1.32 pattern: function Cj6 with 4-param destructuring (no verbose)
+  // {param:K,addMargin:Y,isTranscriptMode:z,hideInTranscript:w}=A
+  const funcMatch = content.match(/function ([A-Za-z0-9]+)\(([A-Z])\)\{let ([a-z])=A1\(\d+\),\{param:([A-Z]),addMargin:([A-Z]),isTranscriptMode:([a-z]),hideInTranscript:([a-z])\}=\2/);
 
   if (!funcMatch) return null;
 
   const funcName = funcMatch[1];
-  const transcriptVar = funcMatch[5];
-  const verboseVar = funcMatch[6];
+  const transcriptVar = funcMatch[6]; // 'z' in current build
 
-  // Find the G assignment: let G=z||w,
-  const guardPattern = new RegExp(`let G=(${transcriptVar})\\|\\|(${verboseVar}),`);
+  // Find the guard pattern: let D=z,j;
+  const guardPattern = new RegExp(`let ([A-Z])=${transcriptVar},([a-z]);`);
   const guardMatch = content.match(guardPattern);
 
   if (guardMatch) {
     return {
-      fullMatch: `let G=${transcriptVar}||${verboseVar},`,
-      transcriptVar,
-      verboseVar,
+      fullMatch: `let ${guardMatch[1]}=${transcriptVar},${guardMatch[2]};`,
+      expandedVar: guardMatch[1],      // 'D'
+      transcriptVar: transcriptVar,    // 'z'
+      secondVar: guardMatch[2],        // 'j'
       funcName,
       isPatched: false,
-      version: 'v2.1.19+'
+      version: 'v2.1.32'
     };
   }
 
-  // Check for already patched version
-  if (content.includes('let G=!0,')) {
+  // Check for already patched: let D=!0,j;
+  const patchedPattern = /let ([A-Z])=!0,([a-z]);/;
+  const patchedMatch = content.match(patchedPattern);
+
+  if (patchedMatch) {
     return {
-      fullMatch: 'let G=!0,',
+      fullMatch: `let ${patchedMatch[1]}=!0,${patchedMatch[2]};`,
       funcName,
       isPatched: true,
-      version: 'v2.1.19+'
+      version: 'v2.1.32'
     };
   }
 
@@ -462,35 +458,35 @@ function extractBannerFunction(content) {
   };
 }
 
-// v2.1.19+: Detect the thinking case pattern with 3-variable guard
+// v2.1.32: Detect the thinking case pattern with 2-variable guard and memo flag
+// Pattern: V=!1,q[0]=V;else V=q[0];let Z=V;...case"thinking":{if(!j&&!Z)return null;
+// Patching: change V=!1 to V=!0 to make Z=true, bypassing the guard
 function detectThinkingPatternV219(content) {
-  // Pattern: case"thinking":{if(!D&&!H&&!T)return null;...isTranscriptMode:D,verbose:H,hideInTranscript:R
-  // Note: hideInTranscript is now R (computed value), not a direct variable
-  const regex = /case"thinking":\{if\(!([A-Za-z])&&!([A-Za-z])&&!([A-Za-z])\)return null;.*?([A-Za-z0-9$]+)\.createElement\(([A-Za-z0-9]+),\{addMargin:([A-Za-z]),param:([A-Za-z]),isTranscriptMode:([A-Za-z]),verbose:([A-Za-z]),hideInTranscript:([A-Za-z])\}/;
+  // Find the memo flag initialization: V=!1,q[0]=V;else V=q[0];let Z=V;
+  const memoPattern = /if\(q\[0\]===Symbol\.for\("react\.memo_cache_sentinel"\)\)([A-Z])=!1,q\[0\]=\1;else \1=q\[0\];let ([A-Z])=\1;switch\([A-Z]\.type\)\{/;
+  const memoMatch = content.match(memoPattern);
 
-  const match = content.match(regex);
-  if (match) {
+  if (memoMatch) {
+    // Also find the case"thinking" to get component info
+    const casePattern = /case"thinking":\{if\(!([a-z])&&!([A-Z])\)return null;let ([A-Z])=[^;]+;[^}]*?([A-Za-z0-9]+)\.createElement\(([A-Za-z0-9]+),\{addMargin:([A-Z]),param:([A-Z]),isTranscriptMode:([a-z]),hideInTranscript:([A-Z])\}/;
+    const caseMatch = content.match(casePattern);
+
     return {
-      fullMatch: match[0],
-      guardVar1: match[1],  // D
-      guardVar2: match[2],  // H
-      guardVar3: match[3],  // T (new in v2.1.19!)
-      reactVar: match[4],
-      componentName: match[5],
-      addMarginVar: match[6],
-      paramVar: match[7],
-      transcriptVar: match[8],
-      verboseVar: match[9],
-      hideInTranscriptVar: match[10],
-      version: 'v2.1.19'
+      fullMatch: memoMatch[0],
+      memoVar: memoMatch[1],      // 'V'
+      guardVar: memoMatch[2],     // 'Z'
+      componentName: caseMatch ? caseMatch[5] : 'unknown',
+      isPatched: false,
+      version: 'v2.1.32'
     };
   }
 
-  // Check for already patched (guard removed, props forced)
-  const patchedRegex = /case"thinking":\{let [A-Za-z]=[^;]+;[^}]*\.createElement\([A-Za-z0-9]+,\{addMargin:[A-Za-z],param:[A-Za-z],isTranscriptMode:!0,verbose:[A-Za-z],hideInTranscript:!1\}/;
+  // Check for already patched: V=!0
+  const patchedPattern = /if\(q\[0\]===Symbol\.for\("react\.memo_cache_sentinel"\)\)([A-Z])=!0,q\[0\]=\1;else \1=q\[0\];let ([A-Z])=\1;switch\([A-Z]\.type\)\{/;
+  const patchedMatch = content.match(patchedPattern);
 
-  if (content.match(patchedRegex)) {
-    return { isPatched: true, version: 'v2.1.19' };
+  if (patchedMatch) {
+    return { isPatched: true, version: 'v2.1.32' };
   }
 
   return null;
@@ -642,35 +638,73 @@ function detectThinkingContent(content) {
   return null;
 }
 
-// v2.1.19+: Detect thinking content wrapper with qO component
-// Pattern: createElement(I,{paddingLeft:2},REACT.createElement(qO,null,J))
+// v2.1.32: Detect thinking content wrapper - two patterns exist
+// Pattern A: createElement(I,{paddingLeft:2},createElement(f,null,createElement(R3,null,z)))
+// Pattern B: createElement(I,{paddingLeft:2},createElement($J,{dimColor:!0},H))
 function detectThinkingContentV219(content) {
-  // Unpatched: createElement(qO,null,VAR)
-  const regexUnpatched = /([\$A-Za-z0-9]+)\.default\.createElement\(I,\{paddingLeft:2\},\1\.default\.createElement\(([a-zA-Z0-9]+),null,([A-Z])\)\)/;
-  // Patched: createElement(qO,{color:'...'},VAR)
-  const regexPatched = /([\$A-Za-z0-9]+)\.default\.createElement\(I,\{paddingLeft:2\},\1\.default\.createElement\(([a-zA-Z0-9]+),\{color:'[^']+'\},([A-Z])\)\)/;
+  // Pattern B: $J with dimColor (this is the main thinking content pattern)
+  // Unpatched: createElement($J,{dimColor:!0},VAR)
+  const regexBUnpatched = /([\$A-Za-z0-9]+)\.default\.createElement\(I,\{paddingLeft:2\},\1\.default\.createElement\(\$J,\{dimColor:!0\},([A-Z])\)\)/;
+  // Patched: createElement($J,{dimColor:!0,color:'...'},VAR)
+  const regexBPatched = /([\$A-Za-z0-9]+)\.default\.createElement\(I,\{paddingLeft:2\},\1\.default\.createElement\(\$J,\{dimColor:!0,color:'[^']+'\},([A-Z])\)\)/;
 
-  let match = content.match(regexUnpatched);
+  let match = content.match(regexBUnpatched);
   if (match) {
     return {
       fullMatch: match[0],
       reactVar: match[1],
-      contentComponent: match[2],
-      contentVar: match[3],
+      contentComponent: '$J',
+      contentVar: match[2],
+      patternType: 'B',
       isPatched: false,
-      version: 'v2.1.19'
+      version: 'v2.1.32'
     };
   }
 
-  match = content.match(regexPatched);
+  match = content.match(regexBPatched);
   if (match) {
     return {
       fullMatch: match[0],
       reactVar: match[1],
-      contentComponent: match[2],
-      contentVar: match[3],
+      contentComponent: '$J',
+      contentVar: match[2],
+      patternType: 'B',
       isPatched: true,
-      version: 'v2.1.19'
+      version: 'v2.1.32'
+    };
+  }
+
+  // Pattern A: Triple nesting f->R3 (fallback)
+  // Unpatched: createElement(f,null,createElement(R3,null,VAR))
+  const regexAUnpatched = /([\$A-Za-z0-9]+)\.(?:default\.)?createElement\(I,\{paddingLeft:2\},\1\.(?:default\.)?createElement\(f,null,\1\.(?:default\.)?createElement\(R3,null,([a-z])\)\)\)/;
+  // Patched: createElement(f,{color:'...'},createElement(R3,null,VAR))
+  const regexAPatched = /([\$A-Za-z0-9]+)\.(?:default\.)?createElement\(I,\{paddingLeft:2\},\1\.(?:default\.)?createElement\(f,\{color:'[^']+'\},\1\.(?:default\.)?createElement\(R3,null,([a-z])\)\)\)/;
+
+  match = content.match(regexAUnpatched);
+  if (match) {
+    return {
+      fullMatch: match[0],
+      reactVar: match[1],
+      contentComponent: 'f',
+      innerComponent: 'R3',
+      contentVar: match[2],
+      patternType: 'A',
+      isPatched: false,
+      version: 'v2.1.32'
+    };
+  }
+
+  match = content.match(regexAPatched);
+  if (match) {
+    return {
+      fullMatch: match[0],
+      reactVar: match[1],
+      contentComponent: 'f',
+      innerComponent: 'R3',
+      contentVar: match[2],
+      patternType: 'A',
+      isPatched: true,
+      version: 'v2.1.32'
     };
   }
 
@@ -817,12 +851,13 @@ function main() {
 
   console.log('\n📝 Applying patches:');
 
-  // Patch 1: Disable collapsed view - change "let G=z||w," to "let G=!0,"
+  // Patch 1: Disable collapsed view - change "let D=z,j;" to "let D=!0,j;"
   if (thinkingComponentInfo) {
     if (thinkingComponentInfo.isPatched) {
       console.log('   ⚠️  Component already patched');
     } else {
-      const replacement = 'let G=!0,';
+      // v2.1.32: Replace "let D=z,j;" with "let D=!0,j;"
+      const replacement = `let ${thinkingComponentInfo.expandedVar}=!0,${thinkingComponentInfo.secondVar};`;
 
       if (patched.includes(thinkingComponentInfo.fullMatch)) {
         if (!DRY_RUN) {
@@ -836,19 +871,16 @@ function main() {
     }
   }
 
-  // Patch 2: Thinking visibility - remove 3-var guard and force transcript mode
+  // Patch 2: Thinking visibility - change memo flag V=!1 to V=!0
   if (thinkingInfo) {
     if (thinkingInfo.isPatched) {
       console.log('   ⚠️  Thinking already patched');
     } else {
-      // Remove 3-variable guard, force isTranscriptMode:!0 and hideInTranscript:!1
-      const replacement = thinkingInfo.fullMatch
-        .replace(
-          `if(!${thinkingInfo.guardVar1}&&!${thinkingInfo.guardVar2}&&!${thinkingInfo.guardVar3})return null;`,
-          ''
-        )
-        .replace(`isTranscriptMode:${thinkingInfo.transcriptVar}`, 'isTranscriptMode:!0')
-        .replace(`hideInTranscript:${thinkingInfo.hideInTranscriptVar}`, 'hideInTranscript:!1');
+      // v2.1.32: Change V=!1 to V=!0 to make Z=true, bypassing guard
+      const replacement = thinkingInfo.fullMatch.replace(
+        `${thinkingInfo.memoVar}=!1,q[0]=${thinkingInfo.memoVar}`,
+        `${thinkingInfo.memoVar}=!0,q[0]=${thinkingInfo.memoVar}`
+      );
 
       if (patched.includes(thinkingInfo.fullMatch)) {
         if (!DRY_RUN) {
@@ -884,159 +916,122 @@ function main() {
   }
 
   // Patch 4: Custom color for thinking content
-  // v2.1.19: Thread color through: qO → t3 → s_
-  // v2.1.20+: Thread color through: P0 → A9 → OZ (or Text wrapper)
+  // v2.1.32: Thread color through $J → R3
   if (resolvedContentColor && thinkingContentInfo) {
     if (thinkingContentInfo.isPatched) {
       console.log('   ⚠️  Content color already patched');
     } else {
       const colorValue = resolvedContentColor;
-      const contentComp = thinkingContentInfo.contentComponent;  // qO or P0
+      const contentComp = thinkingContentInfo.contentComponent;
       const reactVar = thinkingContentInfo.reactVar;
       const contentVar = thinkingContentInfo.contentVar;
       let colorPatchCount = 0;
 
-      // Detect version based on content component name
-      const isV220Plus = contentComp === 'P0';
+      if (thinkingContentInfo.patternType === 'B') {
+        // Pattern B: $J component with dimColor
+        // Step 1: Add color to $J call site
+        // createElement($J,{dimColor:!0},H) → createElement($J,{dimColor:!0,color:'HEX'},H)
+        const callPattern = `${reactVar}.default.createElement($J,{dimColor:!0},${contentVar})`;
+        const callReplacement = `${reactVar}.default.createElement($J,{dimColor:!0,color:'${colorValue}'},${contentVar})`;
 
-      if (isV220Plus) {
-        // v2.1.20+ patching strategy:
-        // Thread color through: P0 → A9 → OZ
-        // OZ already supports color prop, we just need to thread it through
-
-        // Step 1: Modify P0 to accept color prop
-        // Find: function P0(A){let K=s(4),{children:q}=A
-        // Change to: function P0(A){let K=s(4),{children:q,color:$pc}=A
-        const p0Pattern = /(function P0\([A-Z]\)\{let [A-Z]=s\(\d+\),\{children:)([a-zA-Z])(\}=[A-Z])/;
-        const p0Match = patched.match(p0Pattern);
-        if (p0Match && !DRY_RUN) {
-          patched = patched.replace(p0Match[0], `${p0Match[1]}${p0Match[2]},color:$pc${p0Match[3]}`);
-          colorPatchCount++;
-        } else if (p0Match) {
+        if (patched.includes(callPattern)) {
+          if (!DRY_RUN) {
+            patched = patched.replace(callPattern, callReplacement);
+          }
           colorPatchCount++;
         }
 
-        // Step 2: Forward color from P0 to A9
-        // Find: createElement(A9,{key:O.length},X.trim())
-        // Change to: createElement(A9,{key:O.length,color:$pc},X.trim())
+        // Step 2: Modify $J function to accept color prop
+        // Find: {children:K,dimColor:Y}=A
+        // Change to: {children:K,dimColor:Y,color:$cc}=A
+        const djPattern = /(function \$J\([A-Z]\)\{let [a-z]=A1\(\d+\),\{children:)([A-Z])(,dimColor:)([A-Z])(\}=[A-Z])/;
+        const djMatch = patched.match(djPattern);
+        if (djMatch) {
+          if (!DRY_RUN) {
+            patched = patched.replace(djMatch[0], `${djMatch[1]}${djMatch[2]}${djMatch[3]}${djMatch[4]},color:$cc${djMatch[5]}`);
+          }
+          colorPatchCount++;
+        }
+
+        // Step 3: Forward color to R3 text segments in $J
+        // Find: R3,{key:_.length,dimColor:Y},J.trim())
+        // Change to: R3,{key:_.length,dimColor:Y,color:$cc},J.trim())
         if (!DRY_RUN) {
           const before = patched;
           patched = patched.replace(
-            /createElement\(A9,\{key:([A-Z])\.length\}/g,
-            'createElement(A9,{key:$1.length,color:$pc}'
+            /R3,\{key:([A-Z_])\.length,dimColor:([A-Z])\},([A-Z])\.trim\(\)\)/g,
+            'R3,{key:$1.length,dimColor:$2,color:$cc},$3.trim())'
           );
           if (patched !== before) colorPatchCount++;
         } else {
-          if (/createElement\(A9,\{key:[A-Z]\.length\}/.test(patched)) colorPatchCount++;
+          if (/R3,\{key:[A-Z_]\.length,dimColor:[A-Z]\},[A-Z]\.trim\(\)\)/.test(patched)) colorPatchCount++;
         }
 
-        // Step 3: Modify A9 to accept color and pass to OZ
-        // A9 is: A9=Ik.default.memo(function(K){let q=s(9),{children:Y}=K;...
-        // Change {children:Y} to {children:Y,color:$ac}
-        const a9Pattern = /(A9=[A-Za-z0-9]+\.default\.memo\(function\([A-Z]\)\{let [a-z]=s\(\d+\),\{children:)([A-Z])(\}=[A-Z])/;
-        const a9Match = patched.match(a9Pattern);
-        if (a9Match && !DRY_RUN) {
-          patched = patched.replace(a9Match[0], `${a9Match[1]}${a9Match[2]},color:$ac${a9Match[3]}`);
-          colorPatchCount++;
-        } else if (a9Match) {
+        // Step 4: Patch R3 component to accept and use color prop
+        // R3 renders to a_ (Text) elements - we need to forward color there
+        // Find: R3=REACT.default.memo(function(q){let K=A1(12),{children:Y,dimColor:z}=q;
+        // Change to: {children:Y,dimColor:z,color:$rc}=q;
+        const r3Pattern = /(R3=[A-Za-z0-9]+\.default\.memo\(function\([a-z]\)\{let [A-Z]=A1\(\d+\),\{children:)([A-Z])(,dimColor:)([a-z])(\}=[a-z])/;
+        const r3Match = patched.match(r3Pattern);
+        if (r3Match) {
+          if (!DRY_RUN) {
+            patched = patched.replace(r3Match[0], `${r3Match[1]}${r3Match[2]}${r3Match[3]}${r3Match[4]},color:$rc${r3Match[5]}`);
+          }
           colorPatchCount++;
         }
 
-        // Step 4: Pass color to OZ in A9's createElement calls
-        // Find: createElement(OZ,null,... -> createElement(OZ,{color:$ac},...
-        // But only within A9 function (find A9 boundaries first)
-        const a9Start = patched.indexOf('A9=Ik.default.memo(function');
-        if (a9Start !== -1 && !DRY_RUN) {
-          // Find end of A9 by counting parens
-          let depth = 0, started = false, a9End = a9Start;
-          for (let i = a9Start; i < patched.length && i < a9Start + 2000; i++) {
-            if (patched[i] === '(') { depth++; started = true; }
-            if (patched[i] === ')') { depth--; if (started && depth === 0) { a9End = i + 1; break; } }
+        // Step 5: Forward color to a_ (Text) elements in R3
+        // R3 has multiple createElement(a_,...) calls that need color added
+        // Pattern: createElement(a_,{dim:!0},... → createElement(a_,{dim:!0,color:$rc},...
+        // Pattern: createElement(a_,null,... → createElement(a_,{color:$rc},...
+        // Search for R3 component definition (not array assignments)
+        const r3MemoMarker = 'R3=mP.default.memo(function';
+        const r3Start = patched.indexOf(r3MemoMarker);
+        if (r3Start !== -1) {
+          // Find end of R3 memo function by counting parens from the memo( opening
+          const memoOpenParen = r3Start + 'R3=mP.default.memo'.length;
+          let depth = 0, r3End = memoOpenParen;
+          for (let i = memoOpenParen; i < patched.length && i < memoOpenParen + 3000; i++) {
+            if (patched[i] === '(') depth++;
+            if (patched[i] === ')') { depth--; if (depth === 0) { r3End = i + 1; break; } }
           }
 
-          let a9Body = patched.substring(a9Start, a9End);
-          const beforeA9 = a9Body;
+          let r3Body = patched.substring(r3Start, r3End);
+          const beforeR3 = r3Body;
 
-          // Replace createElement(OZ,null, with createElement(OZ,{color:$ac},
-          a9Body = a9Body.replace(/createElement\(OZ,null,/g, 'createElement(OZ,{color:$ac},');
+          if (!DRY_RUN) {
+            // Add color to a_ elements with {dim:!0}
+            r3Body = r3Body.replace(
+              /createElement\(a_,\{dim:!0\},/g,
+              'createElement(a_,{dim:!0,color:$rc},'
+            );
+            // Add color to a_ elements with null props
+            r3Body = r3Body.replace(
+              /createElement\(a_,null,/g,
+              'createElement(a_,{color:$rc},'
+            );
+          }
 
-          // Also handle createElement(z,null, where z=OZ
-          a9Body = a9Body.replace(/createElement\(z,null,/g, 'createElement(z,{color:$ac},');
-
-          if (a9Body !== beforeA9) {
-            patched = patched.substring(0, a9Start) + a9Body + patched.substring(a9End);
+          if (r3Body !== beforeR3) {
+            patched = patched.substring(0, r3Start) + r3Body + patched.substring(r3End);
             colorPatchCount++;
           }
         }
 
-        // Step 5: Inject color at P0 call site
-        const callPattern = `${reactVar}.default.createElement(${contentComp},null,${contentVar})`;
-        const callReplacement = `${reactVar}.default.createElement(${contentComp},{color:'${colorValue}'},${contentVar})`;
+      } else if (thinkingContentInfo.patternType === 'A') {
+        // Pattern A: Triple nesting f->R3
+        // Add color to f: createElement(f,null,...) → createElement(f,{color:'HEX'},...)
+        const callPattern = new RegExp(
+          `(${reactVar}\\.(?:default\\.)?createElement\\(f,)null(,${reactVar}\\.(?:default\\.)?createElement\\(R3,null,${contentVar}\\)\\))`,
+          'g'
+        );
 
-        if (patched.includes(callPattern)) {
-          colorPatchCount++;
-          if (!DRY_RUN) {
-            patched = patched.replace(callPattern, callReplacement);
-          }
-        }
-
-      } else {
-        // v2.1.19 patching strategy (original):
-        // Thread color through: qO → t3 → s_
-
-        // Step 4a: Modify qO to accept color prop
-        const qOPattern = /(function qO\([A-Z]\)\{[^}]*\{children:)([a-zA-Z])(\}=)/;
-        const qOMatch = patched.match(qOPattern);
-        if (qOMatch && !DRY_RUN) {
-          patched = patched.replace(qOMatch[0], `${qOMatch[1]}${qOMatch[2]},color:$qc${qOMatch[3]}`);
-          colorPatchCount++;
-        }
-
-        // Step 4b: Forward color from qO to t3
         if (!DRY_RUN) {
           const before = patched;
-          patched = patched.replace(
-            /(createElement\(t3,\{key:[A-Z]\.length)\}(,)/g,
-            '$1,color:$qc}$2'
-          );
+          patched = patched.replace(callPattern, `$1{color:'${colorValue}'}$2`);
           if (patched !== before) colorPatchCount++;
-        }
-
-        // Step 4c: Modify t3 to accept color prop AND forward to s_
-        const t3Start = patched.indexOf('t3=');
-        if (t3Start !== -1 && !DRY_RUN) {
-          let depth = 0, started = false, t3End = t3Start;
-          for (let i = t3Start; i < patched.length && i < t3Start + 2000; i++) {
-            if (patched[i] === '(') { depth++; started = true; }
-            if (patched[i] === ')') { depth--; if (started && depth === 0) { t3End = i + 1; break; } }
-          }
-
-          let t3Body = patched.substring(t3Start, t3End);
-          t3Body = t3Body.replace(
-            /(\{children:)([A-Z])(\}=[A-Z])/,
-            '$1$2,color:$tc$3'
-          );
-          t3Body = t3Body.replace(
-            /(createElement\(s_,)null(,)/g,
-            '$1{color:$tc}$2'
-          );
-          t3Body = t3Body.replace(
-            /(createElement\(z,)null(,)/g,
-            '$1{color:$tc}$2'
-          );
-          patched = patched.substring(0, t3Start) + t3Body + patched.substring(t3End);
-          colorPatchCount += 2;
-        }
-
-        // Step 4d: Inject color at qO call site
-        const callPattern = `${reactVar}.default.createElement(${contentComp},null,${contentVar})`;
-        const callReplacement = `${reactVar}.default.createElement(${contentComp},{color:'${colorValue}'},${contentVar})`;
-
-        if (patched.includes(callPattern)) {
-          if (!DRY_RUN) {
-            patched = patched.replace(callPattern, callReplacement);
-            colorPatchCount++;
-          }
+        } else {
+          if (callPattern.test(patched)) colorPatchCount++;
         }
       }
 
