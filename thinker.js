@@ -711,6 +711,116 @@ function detectThinkingContentV219(content) {
   return null;
 }
 
+// v2.1.49: Extract thinking component from function with 5-param destructuring (includes verbose)
+// The collapsed view is controlled by: let X=z||w where z=isTranscriptMode, w=verbose
+// Patching: change "let X=z||w" to "let X=!0" to force expanded view
+function extractThinkingComponentV249(content) {
+  const funcMatch = content.match(
+    /function ([A-Za-z0-9$]+)\(([A-Z])\)\{let ([a-z])=([A-Za-z0-9$]+)\(\d+\),\{param:([A-Z]),addMargin:([A-Z]),isTranscriptMode:([a-z]),verbose:([a-z]),hideInTranscript:([A-Za-z$])\}=\2/
+  );
+  if (!funcMatch) return null;
+
+  const funcName = funcMatch[1];
+  const transcriptVar = funcMatch[7];
+  const verboseVar = funcMatch[8];
+
+  const funcStart = content.indexOf(funcMatch[0]);
+  const searchRegion = content.substring(funcStart, funcStart + 800);
+
+  // Unpatched: let X=z||w
+  const guardRegex = new RegExp(`let ([A-Z])=${transcriptVar}\\|\\|${verboseVar}`);
+  const guardMatch = searchRegion.match(guardRegex);
+
+  if (guardMatch) {
+    return {
+      fullMatch: `let ${guardMatch[1]}=${transcriptVar}||${verboseVar}`,
+      expandedVar: guardMatch[1],
+      transcriptVar,
+      verboseVar,
+      funcName,
+      isPatched: false,
+      version: 'v2.1.49'
+    };
+  }
+
+  // If function signature matches but guard doesn't, it may be patched
+  if (searchRegion.includes('∴ Thinking')) {
+    return { funcName, isPatched: true, version: 'v2.1.49' };
+  }
+
+  return null;
+}
+
+// v2.1.49: Detect the thinking case pattern with 3-variable && guard
+// Pattern: case"thinking":{if(!X&&!T&&!$)return null;
+// Patching: change to if(!1)return null;
+function detectThinkingPatternV249(content) {
+  // Unpatched: 3-var AND guard
+  const regex = /case"thinking":\{if\(!([A-Za-z$])&&!([A-Za-z$])&&!([A-Za-z$])\)return null;/;
+  const match = content.match(regex);
+
+  if (match) {
+    return {
+      fullMatch: match[0],
+      guardVars: [match[1], match[2], match[3]],
+      isPatched: false,
+      version: 'v2.1.49'
+    };
+  }
+
+  // Patched: if(!1)return null;
+  const patchedRegex = /case"thinking":\{if\(!1\)return null;/;
+  if (content.match(patchedRegex)) {
+    return { isPatched: true, version: 'v2.1.49' };
+  }
+
+  return null;
+}
+
+// v2.1.49: Detect thinking content wrapper using "∴ Thinking" header as anchor
+// Pattern: createElement(b,{paddingLeft:2},REACT.default.createElement(COMP,{dimColor:!0},VAR))
+function detectThinkingContentV249(content) {
+  const headerIdx = content.indexOf('"∴ Thinking"');
+  if (headerIdx === -1) return null;
+
+  // Search within 600 chars after header for paddingLeft:2 content wrapper
+  const searchRegion = content.substring(headerIdx, headerIdx + 600);
+
+  // Unpatched: createElement(COMP,{dimColor:!0},VAR)
+  const unpatchedRegex = /([\$A-Za-z0-9]+)\.default\.createElement\(([a-zA-Z$]),\{paddingLeft:2\},\1\.default\.createElement\(([a-zA-Z0-9$]+),\{dimColor:!0\},([A-Z])\)\)/;
+  let match = searchRegion.match(unpatchedRegex);
+
+  if (match) {
+    return {
+      fullMatch: match[0],
+      reactVar: match[1],
+      boxElement: match[2],
+      contentComponent: match[3],
+      contentVar: match[4],
+      isPatched: false,
+      version: 'v2.1.49'
+    };
+  }
+
+  // Patched: {dimColor:!0,color:'...'}
+  const patchedRegex = /([\$A-Za-z0-9]+)\.default\.createElement\(([a-zA-Z$]),\{paddingLeft:2\},\1\.default\.createElement\(([a-zA-Z0-9$]+),\{dimColor:!0,color:'[^']+'\},([A-Z])\)\)/;
+  match = searchRegion.match(patchedRegex);
+
+  if (match) {
+    return {
+      fullMatch: match[0],
+      reactVar: match[1],
+      boxElement: match[2],
+      contentComponent: match[3],
+      contentVar: match[4],
+      isPatched: true,
+      version: 'v2.1.49'
+    };
+  }
+
+  return null;
+}
+
 // Detect the thinking case pattern (legacy pre-v2.1.x)
 function detectThinkingPattern(content) {
   // Pattern: case"thinking":if(!X&&!Y)return null;return ZZZ.createElement(AAA,{addMargin:B,param:C,isTranscriptMode:D,verbose:E})
@@ -732,6 +842,136 @@ function detectThinkingPattern(content) {
     verboseVar: match[8],
     version: 'legacy'
   };
+}
+
+// v2.1.49: Apply content color threading through eJ → f3 → UO chain
+// Returns number of sub-patches applied
+function applyContentColorV249(patched, contentInfo, colorValue, dryRun) {
+  const { reactVar, contentComponent, contentVar } = contentInfo;
+  let colorPatchCount = 0;
+
+  // Step A: Add color to content component call site
+  // createElement(eJ,{dimColor:!0},H) → createElement(eJ,{dimColor:!0,color:'HEX'},H)
+  const callPattern = `${reactVar}.default.createElement(${contentComponent},{dimColor:!0},${contentVar})`;
+  const callReplacement = `${reactVar}.default.createElement(${contentComponent},{dimColor:!0,color:'${colorValue}'},${contentVar})`;
+
+  if (patched.includes(callPattern)) {
+    if (!dryRun) {
+      patched = patched.replace(callPattern, callReplacement);
+    }
+    colorPatchCount++;
+  }
+
+  // Step B: Modify content component signature to accept color prop
+  // function eJ({children:A,dimColor:q}) → function eJ({children:A,dimColor:q,color:$tc})
+  const sigPattern = new RegExp(
+    `(function ${contentComponent.replace(/\$/g, '\\$')}\\(\\{children:)([A-Za-z$])(,dimColor:)([A-Za-z$])(\\}\\))`
+  );
+  const sigMatch = patched.match(sigPattern);
+  if (sigMatch) {
+    if (!dryRun) {
+      patched = patched.replace(sigMatch[0], `${sigMatch[1]}${sigMatch[2]}${sigMatch[3]}${sigMatch[4]},color:$tc${sigMatch[5]}`);
+    }
+    colorPatchCount++;
+
+    // Step C: Find text renderer calls in content component and extract its name
+    // Pattern inside eJ: createElement(TEXTCOMP,{key:VAR.length,dimColor:VAR},VAR.trim())
+    const contentFuncStart = patched.indexOf(sigMatch[0].replace(',color:$tc', dryRun ? '' : ',color:$tc'));
+    const actualStart = patched.indexOf(`function ${contentComponent}(`);
+    if (actualStart !== -1) {
+      const contentRegion = patched.substring(actualStart, actualStart + 2000);
+      const textCompRegex = /createElement\(([A-Za-z0-9$]+),\{key:([A-Za-z$_]+)\.length,dimColor:([A-Za-z$])\},([A-Za-z$])\.trim\(\)\)/;
+      const textCompMatch = contentRegion.match(textCompRegex);
+
+      if (textCompMatch) {
+        const textCompName = textCompMatch[1];
+        const dimColorVar = textCompMatch[3];
+
+        // Add color to text component calls in content component
+        // {key:VAR.length,dimColor:VAR} → {key:VAR.length,dimColor:VAR,color:$tc}
+        const textCallPattern = new RegExp(
+          `(createElement\\(${textCompName.replace(/\$/g, '\\$')},\\{key:[A-Za-z$_]+\\.length,dimColor:${dimColorVar})(\\},)`,
+          'g'
+        );
+        if (!dryRun) {
+          const before = patched;
+          patched = patched.replace(textCallPattern, '$1,color:$tc$2');
+          if (patched !== before) colorPatchCount++;
+        } else {
+          if (textCallPattern.test(patched)) colorPatchCount++;
+        }
+
+        // Step D: Modify text renderer (f3) signature to accept color
+        // TEXTCOMP=REACT.default.memo(function(q){let K=CACHE(N),{children:Y,dimColor:z}=q
+        const f3SigPattern = new RegExp(
+          `(${textCompName.replace(/\$/g, '\\$')}=[A-Za-z0-9$]+\\.default\\.memo\\(function\\([a-z]\\)\\{let [A-Z]=[A-Za-z0-9$]+\\(\\d+\\),\\{children:)([A-Z])(,dimColor:)([a-z])(\\}=[a-z])`
+        );
+        const f3SigMatch = patched.match(f3SigPattern);
+
+        if (f3SigMatch) {
+          if (!dryRun) {
+            patched = patched.replace(f3SigMatch[0],
+              `${f3SigMatch[1]}${f3SigMatch[2]}${f3SigMatch[3]}${f3SigMatch[4]},color:$fc${f3SigMatch[5]}`
+            );
+          }
+          colorPatchCount++;
+
+          // Step E: Forward color to Text elements inside f3 body
+          // Find the memo function body by brace counting
+          const f3Marker = `${textCompName}=${f3SigMatch[0].split('=')[0].length > 0 ? '' : ''}`;
+          const f3MemoStart = patched.indexOf(f3SigMatch[0].substring(0, 30));
+          if (f3MemoStart !== -1) {
+            // Find the memo( opening and count to find the end
+            const memoIdx = patched.lastIndexOf('.memo(', f3MemoStart + 50);
+            if (memoIdx !== -1) {
+              const memoOpenParen = memoIdx + 5; // after 'memo('
+              let depth = 1, f3End = memoOpenParen + 1;
+              for (let i = f3End; i < patched.length && i < memoOpenParen + 3000; i++) {
+                if (patched[i] === '(') depth++;
+                if (patched[i] === ')') { depth--; if (depth === 0) { f3End = i + 1; break; } }
+              }
+
+              let f3Body = patched.substring(f3MemoStart, f3End);
+              const beforeF3 = f3Body;
+
+              if (!dryRun) {
+                // Find the Text element name from createElement(TEXT,{dim:!0}, pattern
+                const textElemMatch = f3Body.match(/createElement\(([A-Za-z0-9$_]+),\{dim:!0\},/);
+                if (textElemMatch) {
+                  const textElem = textElemMatch[1];
+                  const textElemEscaped = textElem.replace(/\$/g, '\\$');
+
+                  // Add color to Text elements with {dim:!0}
+                  f3Body = f3Body.replace(
+                    new RegExp(`createElement\\(${textElemEscaped},\\{dim:!0\\},`, 'g'),
+                    `createElement(${textElem},{dim:!0,color:$fc},`
+                  );
+                  // Add color to Text elements with null props
+                  f3Body = f3Body.replace(
+                    new RegExp(`createElement\\(${textElemEscaped},null,`, 'g'),
+                    `createElement(${textElem},{color:$fc},`
+                  );
+                }
+
+                // Forward color in ANSI span callback: after if(z)M.dim=!0; add if($fc)M.color=$fc;
+                f3Body = f3Body.replace(
+                  /if\(([a-z$])\)([A-Z])\.dim=!0;/g,
+                  'if($1)$2.dim=!0;if($fc)$2.color=$fc;'
+                );
+              }
+
+              if (f3Body !== beforeF3) {
+                patched = patched.substring(0, f3MemoStart) + f3Body + patched.substring(f3End);
+                colorPatchCount++;
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+
+  return { patched, colorPatchCount };
 }
 
 // Main
@@ -769,22 +1009,20 @@ function main() {
   const version = getVersion(content);
   console.log(`📦 Version: ${version}\n`);
 
-  // Detect patterns - v2.1.19 only
-  const thinkingComponentInfo = extractThinkingComponentV219(content);
-  const thinkingInfo = detectThinkingPatternV219(content);
+  // Detect patterns - try v2.1.49 first, fall back to v2.1.32
+  const thinkingComponentInfo = extractThinkingComponentV249(content) || extractThinkingComponentV219(content);
+  const thinkingInfo = detectThinkingPatternV249(content) || detectThinkingPatternV219(content);
   const expandedHeaderInfo = detectExpandedHeaderV219(content);
-  const thinkingContentInfo = detectThinkingContentV219(content);
+  const thinkingContentInfo = detectThinkingContentV249(content) || detectThinkingContentV219(content);
 
   // Resolve colors from theme preset, individual presets, or use as-is
   let resolvedHeaderColor, resolvedContentColor;
 
   if (THEME && THEME_PRESETS[THEME]) {
-    // Theme preset overrides individual colors
     resolvedHeaderColor = THEME_PRESETS[THEME].header;
     resolvedContentColor = THEME_PRESETS[THEME].content;
   } else {
     resolvedHeaderColor = CUSTOM_COLOR ? (COLOR_PRESETS[CUSTOM_COLOR] || CUSTOM_COLOR) : null;
-    // Content color defaults to header color if not specified separately
     resolvedContentColor = CONTENT_COLOR
       ? (COLOR_PRESETS[CONTENT_COLOR] || CONTENT_COLOR)
       : resolvedHeaderColor;
@@ -793,13 +1031,13 @@ function main() {
   console.log('🔬 Pattern Detection:');
 
   if (thinkingComponentInfo) {
-    console.log(`   ✅ Collapsed view: guard detected`);
+    console.log(`   ✅ Collapsed view: guard detected (${thinkingComponentInfo.version || 'legacy'})`);
   } else {
     console.log('   ⚠️  Collapsed view not detected');
   }
 
   if (thinkingInfo) {
-    console.log(`   ✅ Thinking case: component ${thinkingInfo.componentName}`);
+    console.log(`   ✅ Thinking case: detected (${thinkingInfo.version || 'legacy'})`);
   } else {
     console.log('   ⚠️  Thinking case not detected');
   }
@@ -811,7 +1049,7 @@ function main() {
   }
 
   if (thinkingContentInfo) {
-    console.log(`   ✅ Thinking content: wrapper found (${thinkingContentInfo.contentComponent})`);
+    console.log(`   ✅ Thinking content: wrapper found (${thinkingContentInfo.contentComponent}, ${thinkingContentInfo.version || 'legacy'})`);
   } else {
     console.log('   ⚠️  Thinking content wrapper not detected');
   }
@@ -851,10 +1089,23 @@ function main() {
 
   console.log('\n📝 Applying patches:');
 
-  // Patch 1: Disable collapsed view - change "let D=z,j;" to "let D=!0,j;"
+  // Patch 1: Disable collapsed view
   if (thinkingComponentInfo) {
     if (thinkingComponentInfo.isPatched) {
       console.log('   ⚠️  Component already patched');
+    } else if (thinkingComponentInfo.version === 'v2.1.49') {
+      // v2.1.49: Replace "let X=z||w" with "let X=!0"
+      const replacement = `let ${thinkingComponentInfo.expandedVar}=!0`;
+
+      if (patched.includes(thinkingComponentInfo.fullMatch)) {
+        if (!DRY_RUN) {
+          patched = patched.replace(thinkingComponentInfo.fullMatch, replacement);
+        }
+        patchCount++;
+        console.log('   ✅ Collapsed view disabled (v2.1.49)' + (DRY_RUN ? ' [DRY RUN]' : ''));
+      } else {
+        console.log('   ❌ Component patch failed - pattern mismatch');
+      }
     } else {
       // v2.1.32: Replace "let D=z,j;" with "let D=!0,j;"
       const replacement = `let ${thinkingComponentInfo.expandedVar}=!0,${thinkingComponentInfo.secondVar};`;
@@ -864,17 +1115,31 @@ function main() {
           patched = patched.replace(thinkingComponentInfo.fullMatch, replacement);
         }
         patchCount++;
-        console.log('   ✅ Collapsed view disabled' + (DRY_RUN ? ' [DRY RUN]' : ''));
+        console.log('   ✅ Collapsed view disabled (v2.1.32)' + (DRY_RUN ? ' [DRY RUN]' : ''));
       } else {
         console.log('   ❌ Component patch failed - pattern mismatch');
       }
     }
   }
 
-  // Patch 2: Thinking visibility - change memo flag V=!1 to V=!0
+  // Patch 2: Thinking visibility - disable guard
   if (thinkingInfo) {
     if (thinkingInfo.isPatched) {
       console.log('   ⚠️  Thinking already patched');
+    } else if (thinkingInfo.version === 'v2.1.49') {
+      // v2.1.49: Replace 3-var guard with if(!1)
+      const original = thinkingInfo.fullMatch;
+      const replacement = 'case"thinking":{if(!1)return null;';
+
+      if (patched.includes(original)) {
+        if (!DRY_RUN) {
+          patched = patched.replace(original, replacement);
+        }
+        patchCount++;
+        console.log('   ✅ Thinking visibility forced (v2.1.49)' + (DRY_RUN ? ' [DRY RUN]' : ''));
+      } else {
+        console.log('   ❌ Thinking patch failed - pattern mismatch');
+      }
     } else {
       // v2.1.32: Change V=!1 to V=!0 to make Z=true, bypassing guard
       const replacement = thinkingInfo.fullMatch.replace(
@@ -887,7 +1152,7 @@ function main() {
           patched = patched.replace(thinkingInfo.fullMatch, replacement);
         }
         patchCount++;
-        console.log('   ✅ Thinking visibility forced' + (DRY_RUN ? ' [DRY RUN]' : ''));
+        console.log('   ✅ Thinking visibility forced (v2.1.32)' + (DRY_RUN ? ' [DRY RUN]' : ''));
       } else {
         console.log('   ❌ Thinking patch failed - pattern mismatch');
       }
@@ -895,7 +1160,7 @@ function main() {
   }
 
   // Patch 3: Custom color for expanded header (optional)
-  // v2.1.19: createElement(f,{dimColor:!0,italic:!0},D,"…") where D is variable
+  // v2.1.19+: createElement(f,{dimColor:!0,italic:!0},D,"…") where D is variable
   if (resolvedHeaderColor && expandedHeaderInfo) {
     if (expandedHeaderInfo.isPatched) {
       console.log('   ⚠️  Header color already patched');
@@ -916,11 +1181,22 @@ function main() {
   }
 
   // Patch 4: Custom color for thinking content
-  // v2.1.32: Thread color through $J → R3
   if (resolvedContentColor && thinkingContentInfo) {
     if (thinkingContentInfo.isPatched) {
       console.log('   ⚠️  Content color already patched');
+    } else if (thinkingContentInfo.version === 'v2.1.49') {
+      // v2.1.49: Thread color through eJ → f3 → UO chain
+      const result = applyContentColorV249(patched, thinkingContentInfo, resolvedContentColor, DRY_RUN);
+      patched = result.patched;
+
+      if (result.colorPatchCount > 0) {
+        patchCount++;
+        console.log(`   ✅ Content color: ${resolvedContentColor} (${result.colorPatchCount} modifications, v2.1.49)` + (DRY_RUN ? ' [DRY RUN]' : ''));
+      } else {
+        console.log(`   ❌ Content color: no patterns matched (v2.1.49)`);
+      }
     } else {
+      // v2.1.32: Thread color through $J → R3 chain
       const colorValue = resolvedContentColor;
       const contentComp = thinkingContentInfo.contentComponent;
       const reactVar = thinkingContentInfo.reactVar;
@@ -928,9 +1204,6 @@ function main() {
       let colorPatchCount = 0;
 
       if (thinkingContentInfo.patternType === 'B') {
-        // Pattern B: $J component with dimColor
-        // Step 1: Add color to $J call site
-        // createElement($J,{dimColor:!0},H) → createElement($J,{dimColor:!0,color:'HEX'},H)
         const callPattern = `${reactVar}.default.createElement($J,{dimColor:!0},${contentVar})`;
         const callReplacement = `${reactVar}.default.createElement($J,{dimColor:!0,color:'${colorValue}'},${contentVar})`;
 
@@ -941,9 +1214,6 @@ function main() {
           colorPatchCount++;
         }
 
-        // Step 2: Modify $J function to accept color prop
-        // Find: {children:K,dimColor:Y}=A
-        // Change to: {children:K,dimColor:Y,color:$cc}=A
         const djPattern = /(function \$J\([A-Z]\)\{let [a-z]=A1\(\d+\),\{children:)([A-Z])(,dimColor:)([A-Z])(\}=[A-Z])/;
         const djMatch = patched.match(djPattern);
         if (djMatch) {
@@ -953,9 +1223,6 @@ function main() {
           colorPatchCount++;
         }
 
-        // Step 3: Forward color to R3 text segments in $J
-        // Find: R3,{key:_.length,dimColor:Y},J.trim())
-        // Change to: R3,{key:_.length,dimColor:Y,color:$cc},J.trim())
         if (!DRY_RUN) {
           const before = patched;
           patched = patched.replace(
@@ -967,10 +1234,6 @@ function main() {
           if (/R3,\{key:[A-Z_]\.length,dimColor:[A-Z]\},[A-Z]\.trim\(\)\)/.test(patched)) colorPatchCount++;
         }
 
-        // Step 4: Patch R3 component to accept and use color prop
-        // R3 renders to a_ (Text) elements - we need to forward color there
-        // Find: R3=REACT.default.memo(function(q){let K=A1(12),{children:Y,dimColor:z}=q;
-        // Change to: {children:Y,dimColor:z,color:$rc}=q;
         const r3Pattern = /(R3=[A-Za-z0-9]+\.default\.memo\(function\([a-z]\)\{let [A-Z]=A1\(\d+\),\{children:)([A-Z])(,dimColor:)([a-z])(\}=[a-z])/;
         const r3Match = patched.match(r3Pattern);
         if (r3Match) {
@@ -980,15 +1243,9 @@ function main() {
           colorPatchCount++;
         }
 
-        // Step 5: Forward color to a_ (Text) elements in R3
-        // R3 has multiple createElement(a_,...) calls that need color added
-        // Pattern: createElement(a_,{dim:!0},... → createElement(a_,{dim:!0,color:$rc},...
-        // Pattern: createElement(a_,null,... → createElement(a_,{color:$rc},...
-        // Search for R3 component definition (not array assignments)
         const r3MemoMarker = 'R3=mP.default.memo(function';
         const r3Start = patched.indexOf(r3MemoMarker);
         if (r3Start !== -1) {
-          // Find end of R3 memo function by counting parens from the memo( opening
           const memoOpenParen = r3Start + 'R3=mP.default.memo'.length;
           let depth = 0, r3End = memoOpenParen;
           for (let i = memoOpenParen; i < patched.length && i < memoOpenParen + 3000; i++) {
@@ -1000,12 +1257,10 @@ function main() {
           const beforeR3 = r3Body;
 
           if (!DRY_RUN) {
-            // Add color to a_ elements with {dim:!0}
             r3Body = r3Body.replace(
               /createElement\(a_,\{dim:!0\},/g,
               'createElement(a_,{dim:!0,color:$rc},'
             );
-            // Add color to a_ elements with null props
             r3Body = r3Body.replace(
               /createElement\(a_,null,/g,
               'createElement(a_,{color:$rc},'
@@ -1017,10 +1272,7 @@ function main() {
             colorPatchCount++;
           }
         }
-
       } else if (thinkingContentInfo.patternType === 'A') {
-        // Pattern A: Triple nesting f->R3
-        // Add color to f: createElement(f,null,...) → createElement(f,{color:'HEX'},...)
         const callPattern = new RegExp(
           `(${reactVar}\\.(?:default\\.)?createElement\\(f,)null(,${reactVar}\\.(?:default\\.)?createElement\\(R3,null,${contentVar}\\)\\))`,
           'g'
@@ -1037,9 +1289,9 @@ function main() {
 
       if (colorPatchCount > 0) {
         patchCount++;
-        console.log(`   ✅ Content color: ${resolvedContentColor} (${colorPatchCount} modifications)` + (DRY_RUN ? ' [DRY RUN]' : ''));
+        console.log(`   ✅ Content color: ${resolvedContentColor} (${colorPatchCount} modifications, v2.1.32)` + (DRY_RUN ? ' [DRY RUN]' : ''));
       } else {
-        console.log(`   ❌ Content color: no patterns matched`);
+        console.log(`   ❌ Content color: no patterns matched (v2.1.32)`);
       }
     }
   }
@@ -1051,7 +1303,6 @@ function main() {
 
   // Write changes
   if (!DRY_RUN) {
-    // Create backup if doesn't exist
     if (!fs.existsSync(backupPath)) {
       fs.copyFileSync(cliPath, backupPath);
       console.log(`\n💾 Backup created: ${backupPath}`);
