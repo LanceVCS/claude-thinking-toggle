@@ -716,7 +716,7 @@ function detectThinkingContentV219(content) {
 // Patching: change "let X=z||w" to "let X=!0" to force expanded view
 function extractThinkingComponentV249(content) {
   const funcMatch = content.match(
-    /function ([A-Za-z0-9$]+)\(([A-Z])\)\{let ([a-z])=([A-Za-z0-9$]+)\(\d+\),\{param:([A-Z]),addMargin:([A-Z]),isTranscriptMode:([a-z]),verbose:([a-z]),hideInTranscript:([A-Za-z$])\}=\2/
+    /function ([A-Za-z0-9$]+)\(([A-Z])\)\{let ([a-z])=([A-Za-z0-9$]+)\(\d+\),\{param:([A-Z]),addMargin:([A-Z]),isTranscriptMode:([a-z]),verbose:([a-z]),hideInTranscript:([A-Za-z$_])\}=\2/
   );
   if (!funcMatch) return null;
 
@@ -739,13 +739,13 @@ function extractThinkingComponentV249(content) {
       verboseVar,
       funcName,
       isPatched: false,
-      version: 'v2.1.49'
+      version: 'v2.1.49+'
     };
   }
 
   // If function signature matches but guard doesn't, it may be patched
   if (searchRegion.includes('∴ Thinking')) {
-    return { funcName, isPatched: true, version: 'v2.1.49' };
+    return { funcName, isPatched: true, version: 'v2.1.49+' };
   }
 
   return null;
@@ -756,7 +756,7 @@ function extractThinkingComponentV249(content) {
 // Patching: change to if(!1)return null;
 function detectThinkingPatternV249(content) {
   // Unpatched: 3-var AND guard
-  const regex = /case"thinking":\{if\(!([A-Za-z$])&&!([A-Za-z$])&&!([A-Za-z$])\)return null;/;
+  const regex = /case"thinking":\{if\(!([A-Za-z$_])&&!([A-Za-z$_])&&!([A-Za-z$_])\)return null;/;
   const match = content.match(regex);
 
   if (match) {
@@ -764,14 +764,14 @@ function detectThinkingPatternV249(content) {
       fullMatch: match[0],
       guardVars: [match[1], match[2], match[3]],
       isPatched: false,
-      version: 'v2.1.49'
+      version: 'v2.1.49+'
     };
   }
 
   // Patched: if(!1)return null;
   const patchedRegex = /case"thinking":\{if\(!1\)return null;/;
   if (content.match(patchedRegex)) {
-    return { isPatched: true, version: 'v2.1.49' };
+    return { isPatched: true, version: 'v2.1.49+' };
   }
 
   return null;
@@ -787,7 +787,7 @@ function detectThinkingContentV249(content) {
   const searchRegion = content.substring(headerIdx, headerIdx + 600);
 
   // Unpatched: createElement(COMP,{dimColor:!0},VAR)
-  const unpatchedRegex = /([\$A-Za-z0-9]+)\.default\.createElement\(([a-zA-Z$]),\{paddingLeft:2\},\1\.default\.createElement\(([a-zA-Z0-9$]+),\{dimColor:!0\},([A-Z])\)\)/;
+  const unpatchedRegex = /([\$A-Za-z0-9]+)\.default\.createElement\(([a-zA-Z$]),\{paddingLeft:2\},\1\.default\.createElement\(([a-zA-Z0-9$]+),\{dimColor:!0\},([A-Z$_])\)\)/;
   let match = searchRegion.match(unpatchedRegex);
 
   if (match) {
@@ -798,12 +798,12 @@ function detectThinkingContentV249(content) {
       contentComponent: match[3],
       contentVar: match[4],
       isPatched: false,
-      version: 'v2.1.49'
+      version: 'v2.1.49+'
     };
   }
 
   // Patched: {dimColor:!0,color:'...'}
-  const patchedRegex = /([\$A-Za-z0-9]+)\.default\.createElement\(([a-zA-Z$]),\{paddingLeft:2\},\1\.default\.createElement\(([a-zA-Z0-9$]+),\{dimColor:!0,color:'[^']+'\},([A-Z])\)\)/;
+  const patchedRegex = /([\$A-Za-z0-9]+)\.default\.createElement\(([a-zA-Z$]),\{paddingLeft:2\},\1\.default\.createElement\(([a-zA-Z0-9$]+),\{dimColor:!0,color:'[^']+'\},([A-Z$_])\)\)/;
   match = searchRegion.match(patchedRegex);
 
   if (match) {
@@ -814,7 +814,7 @@ function detectThinkingContentV249(content) {
       contentComponent: match[3],
       contentVar: match[4],
       isPatched: true,
-      version: 'v2.1.49'
+      version: 'v2.1.49+'
     };
   }
 
@@ -863,11 +863,29 @@ function applyContentColorV249(patched, contentInfo, colorValue, dryRun) {
   }
 
   // Step B: Modify content component signature to accept color prop
-  // function eJ({children:A,dimColor:q}) → function eJ({children:A,dimColor:q,color:$tc})
+  // Old-style: function eJ({children:A,dimColor:q}) → function eJ({children:A,dimColor:q,color:$tc})
+  // New-style: function eJ(A){...{children:K,dimColor:Y}=A} → {children:K,dimColor:Y,color:$tc}=A
   const sigPattern = new RegExp(
-    `(function ${contentComponent.replace(/\$/g, '\\$')}\\(\\{children:)([A-Za-z$])(,dimColor:)([A-Za-z$])(\\}\\))`
+    `(function ${contentComponent.replace(/\$/g, '\\$')}\\(\\{children:)([A-Za-z$_])(,dimColor:)([A-Za-z$_])(\\}\\))`
   );
-  const sigMatch = patched.match(sigPattern);
+  let sigMatch = patched.match(sigPattern);
+
+  if (!sigMatch) {
+    // Try new-style: function COMP(A){...{children:K,dimColor:Y}=A}
+    const escapedComp = contentComponent.replace(/\$/g, '\\$');
+    const funcSigMatch = patched.match(new RegExp(
+      `function ${escapedComp}\\(([A-Za-z$_])\\)\\{`
+    ));
+    if (funcSigMatch) {
+      const paramVar = funcSigMatch[1];
+      const escapedParam = paramVar.replace(/\$/g, '\\$');
+      const sigPatternNew = new RegExp(
+        `(\\{children:)([A-Za-z$_])(,dimColor:)([A-Za-z$_])(\\}=${escapedParam})`
+      );
+      sigMatch = patched.match(sigPatternNew);
+    }
+  }
+
   if (sigMatch) {
     if (!dryRun) {
       patched = patched.replace(sigMatch[0], `${sigMatch[1]}${sigMatch[2]}${sigMatch[3]}${sigMatch[4]},color:$tc${sigMatch[5]}`);
@@ -880,7 +898,7 @@ function applyContentColorV249(patched, contentInfo, colorValue, dryRun) {
     const actualStart = patched.indexOf(`function ${contentComponent}(`);
     if (actualStart !== -1) {
       const contentRegion = patched.substring(actualStart, actualStart + 2000);
-      const textCompRegex = /createElement\(([A-Za-z0-9$]+),\{key:([A-Za-z$_]+)\.length,dimColor:([A-Za-z$])\},([A-Za-z$])\.trim\(\)\)/;
+      const textCompRegex = /createElement\(([A-Za-z0-9$]+),\{key:([A-Za-z$_]+)\.length,dimColor:([A-Za-z$_])\},([A-Za-z$_])\.trim\(\)\)/;
       const textCompMatch = contentRegion.match(textCompRegex);
 
       if (textCompMatch) {
@@ -904,7 +922,7 @@ function applyContentColorV249(patched, contentInfo, colorValue, dryRun) {
         // Step D: Modify text renderer (f3) signature to accept color
         // TEXTCOMP=REACT.default.memo(function(q){let K=CACHE(N),{children:Y,dimColor:z}=q
         const f3SigPattern = new RegExp(
-          `(${textCompName.replace(/\$/g, '\\$')}=[A-Za-z0-9$]+\\.default\\.memo\\(function\\([a-z]\\)\\{let [A-Z]=[A-Za-z0-9$]+\\(\\d+\\),\\{children:)([A-Z])(,dimColor:)([a-z])(\\}=[a-z])`
+          `(${textCompName.replace(/\$/g, '\\$')}=[A-Za-z0-9$]+\\.default\\.memo\\(function\\([a-z$_]\\)\\{let [A-Z$_]=[A-Za-z0-9$]+\\(\\d+\\),\\{children:)([A-Z$_])(,dimColor:)([a-z$_])(\\}=[a-z$_])`
         );
         const f3SigMatch = patched.match(f3SigPattern);
 
@@ -955,7 +973,7 @@ function applyContentColorV249(patched, contentInfo, colorValue, dryRun) {
 
                 // Forward color in ANSI span callback: after if(z)M.dim=!0; add if($fc)M.color=$fc;
                 f3Body = f3Body.replace(
-                  /if\(([a-z$])\)([A-Z])\.dim=!0;/g,
+                  /if\(([a-z$_])\)([A-Z$_])\.dim=!0;/g,
                   'if($1)$2.dim=!0;if($fc)$2.color=$fc;'
                 );
               }
@@ -1093,7 +1111,7 @@ function main() {
   if (thinkingComponentInfo) {
     if (thinkingComponentInfo.isPatched) {
       console.log('   ⚠️  Component already patched');
-    } else if (thinkingComponentInfo.version === 'v2.1.49') {
+    } else if (thinkingComponentInfo.version === 'v2.1.49+') {
       // v2.1.49: Replace "let X=z||w" with "let X=!0"
       const replacement = `let ${thinkingComponentInfo.expandedVar}=!0`;
 
@@ -1126,7 +1144,7 @@ function main() {
   if (thinkingInfo) {
     if (thinkingInfo.isPatched) {
       console.log('   ⚠️  Thinking already patched');
-    } else if (thinkingInfo.version === 'v2.1.49') {
+    } else if (thinkingInfo.version === 'v2.1.49+') {
       // v2.1.49: Replace 3-var guard with if(!1)
       const original = thinkingInfo.fullMatch;
       const replacement = 'case"thinking":{if(!1)return null;';
@@ -1184,7 +1202,7 @@ function main() {
   if (resolvedContentColor && thinkingContentInfo) {
     if (thinkingContentInfo.isPatched) {
       console.log('   ⚠️  Content color already patched');
-    } else if (thinkingContentInfo.version === 'v2.1.49') {
+    } else if (thinkingContentInfo.version === 'v2.1.49+') {
       // v2.1.49: Thread color through eJ → f3 → UO chain
       const result = applyContentColorV249(patched, thinkingContentInfo, resolvedContentColor, DRY_RUN);
       patched = result.patched;
