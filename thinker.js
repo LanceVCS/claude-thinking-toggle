@@ -556,6 +556,39 @@ function detectExpandedHeader(content) {
   return null;
 }
 
+// v2.1.69+: Detect expanded header with literal string args
+// Pattern: createElement(T,{dimColor:!0,italic:!0},"∴ Thinking","…")
+function detectExpandedHeaderV269(content) {
+  // Unpatched: {dimColor:!0,italic:!0},"∴ Thinking","…"
+  const regexUnpatched = /([\$A-Za-z0-9]+)\.default\.createElement\(([a-zA-Z$_]),\{dimColor:!0,italic:!0\},"∴ Thinking","…"\)/;
+  // Patched: {italic:!0,color:"..."},"∴ Thinking","…"
+  const regexPatched = /([\$A-Za-z0-9]+)\.default\.createElement\(([a-zA-Z$_]),\{italic:!0,color:"[^"]+"\},"∴ Thinking","…"\)/;
+
+  let match = content.match(regexUnpatched);
+  if (match) {
+    return {
+      fullMatch: match[0],
+      reactVar: match[1],
+      textElement: match[2],
+      isPatched: false,
+      version: 'v2.1.69'
+    };
+  }
+
+  match = content.match(regexPatched);
+  if (match) {
+    return {
+      fullMatch: match[0],
+      reactVar: match[1],
+      textElement: match[2],
+      isPatched: true,
+      version: 'v2.1.69'
+    };
+  }
+
+  return null;
+}
+
 // v2.1.19+: Detect expanded header with variable text reference
 // Pattern: createElement(f,{dimColor:!0,italic:!0},D,"…") where D holds "∴ Thinking"
 function detectExpandedHeaderV219(content) {
@@ -743,7 +776,27 @@ function extractThinkingComponentV249(content) {
     };
   }
 
-  // If function signature matches but guard doesn't, it may be patched
+  // v2.1.69+: Direct guard pattern: if(!(z||w)){ (no intermediate variable)
+  const directGuardRegex = new RegExp(`if\\(!\\(${transcriptVar}\\|\\|${verboseVar}\\)\\)\\{`);
+  const directGuardMatch = searchRegion.match(directGuardRegex);
+
+  if (directGuardMatch) {
+    return {
+      fullMatch: `if(!(${transcriptVar}||${verboseVar})){`,
+      transcriptVar,
+      verboseVar,
+      funcName,
+      isPatched: false,
+      version: 'v2.1.69'
+    };
+  }
+
+  // Check for already patched direct guard: if(!1){
+  if (searchRegion.includes('if(!1){')) {
+    return { funcName, isPatched: true, version: 'v2.1.69' };
+  }
+
+  // If function signature matches but guard doesn't, it may be patched (v2.1.49 style)
   if (searchRegion.includes('∴ Thinking')) {
     return { funcName, isPatched: true, version: 'v2.1.49+' };
   }
@@ -751,18 +804,32 @@ function extractThinkingComponentV249(content) {
   return null;
 }
 
-// v2.1.49: Detect the thinking case pattern with 3-variable && guard
-// Pattern: case"thinking":{if(!X&&!T&&!$)return null;
+// v2.1.49+: Detect the thinking case pattern with 2 or 3-variable && guard
+// Pattern: case"thinking":{if(!X&&!T&&!$)return null; (3-var, v2.1.49)
+// Pattern: case"thinking":{if(!D&&!_)return null;     (2-var, v2.1.69+)
 // Patching: change to if(!1)return null;
 function detectThinkingPatternV249(content) {
-  // Unpatched: 3-var AND guard
-  const regex = /case"thinking":\{if\(!([A-Za-z$_])&&!([A-Za-z$_])&&!([A-Za-z$_])\)return null;/;
-  const match = content.match(regex);
+  // Unpatched: 3-var AND guard (v2.1.49-v2.1.5x)
+  const regex3 = /case"thinking":\{if\(!([A-Za-z$_])&&!([A-Za-z$_])&&!([A-Za-z$_])\)return null;/;
+  const match3 = content.match(regex3);
 
-  if (match) {
+  if (match3) {
     return {
-      fullMatch: match[0],
-      guardVars: [match[1], match[2], match[3]],
+      fullMatch: match3[0],
+      guardVars: [match3[1], match3[2], match3[3]],
+      isPatched: false,
+      version: 'v2.1.49+'
+    };
+  }
+
+  // Unpatched: 2-var AND guard (v2.1.69+)
+  const regex2 = /case"thinking":\{if\(!([A-Za-z$_])&&!([A-Za-z$_])\)return null;/;
+  const match2 = content.match(regex2);
+
+  if (match2) {
+    return {
+      fullMatch: match2[0],
+      guardVars: [match2[1], match2[2]],
       isPatched: false,
       version: 'v2.1.49+'
     };
@@ -1030,7 +1097,7 @@ function main() {
   // Detect patterns - try v2.1.49 first, fall back to v2.1.32
   const thinkingComponentInfo = extractThinkingComponentV249(content) || extractThinkingComponentV219(content);
   const thinkingInfo = detectThinkingPatternV249(content) || detectThinkingPatternV219(content);
-  const expandedHeaderInfo = detectExpandedHeaderV219(content);
+  const expandedHeaderInfo = detectExpandedHeaderV269(content) || detectExpandedHeaderV219(content);
   const thinkingContentInfo = detectThinkingContentV249(content) || detectThinkingContentV219(content);
 
   // Resolve colors from theme preset, individual presets, or use as-is
@@ -1111,6 +1178,19 @@ function main() {
   if (thinkingComponentInfo) {
     if (thinkingComponentInfo.isPatched) {
       console.log('   ⚠️  Component already patched');
+    } else if (thinkingComponentInfo.version === 'v2.1.69') {
+      // v2.1.69: Replace "if(!(z||w)){" with "if(!1){"
+      const replacement = 'if(!1){';
+
+      if (patched.includes(thinkingComponentInfo.fullMatch)) {
+        if (!DRY_RUN) {
+          patched = patched.replace(thinkingComponentInfo.fullMatch, replacement);
+        }
+        patchCount++;
+        console.log('   ✅ Collapsed view disabled (v2.1.69)' + (DRY_RUN ? ' [DRY RUN]' : ''));
+      } else {
+        console.log('   ❌ Component patch failed - pattern mismatch');
+      }
     } else if (thinkingComponentInfo.version === 'v2.1.49+') {
       // v2.1.49: Replace "let X=z||w" with "let X=!0"
       const replacement = `let ${thinkingComponentInfo.expandedVar}=!0`;
@@ -1182,7 +1262,22 @@ function main() {
   if (resolvedHeaderColor && expandedHeaderInfo) {
     if (expandedHeaderInfo.isPatched) {
       console.log('   ⚠️  Header color already patched');
+    } else if (expandedHeaderInfo.version === 'v2.1.69') {
+      // v2.1.69: Literal string "∴ Thinking","…"
+      const colorValue = `"${resolvedHeaderColor}"`;
+      const replacement = `${expandedHeaderInfo.reactVar}.default.createElement(${expandedHeaderInfo.textElement},{italic:!0,color:${colorValue}},"∴ Thinking","…")`;
+
+      if (patched.includes(expandedHeaderInfo.fullMatch)) {
+        if (!DRY_RUN) {
+          patched = patched.replace(expandedHeaderInfo.fullMatch, replacement);
+        }
+        patchCount++;
+        console.log(`   ✅ Header color: ${resolvedHeaderColor} (v2.1.69)` + (DRY_RUN ? ' [DRY RUN]' : ''));
+      } else {
+        console.log('   ❌ Header color patch failed - pattern mismatch');
+      }
     } else {
+      // v2.1.19+: Variable text reference
       const colorValue = `"${resolvedHeaderColor}"`;
       const replacement = `${expandedHeaderInfo.reactVar}.default.createElement(${expandedHeaderInfo.textElement},{italic:!0,color:${colorValue}},${expandedHeaderInfo.textVar},"…")`;
 
