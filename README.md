@@ -2,6 +2,9 @@
 
 Makes Claude Code's thinking blocks visible by default and adds custom color support.
 
+Note: Currently not maintaining this, as I am opting to use verbose output to show both MCP tool calls and thinking blocks at the same time. 
+      You are more than welcome to ask Claude to update this to work with the latest version though! 
+
 ## Quick Start
 
 ```bash
